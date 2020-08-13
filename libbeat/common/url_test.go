@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // +build !integration
 
 package common
@@ -8,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetUrl(t *testing.T) {
@@ -63,7 +81,7 @@ func TestGetUrl(t *testing.T) {
 
 	for input, output := range inputOutput {
 		urlNew, err := MakeURL("", "", input, 9200)
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		assert.Equal(t, output, urlNew, fmt.Sprintf("input: %v", input))
 	}
 
@@ -76,7 +94,7 @@ func TestGetUrl(t *testing.T) {
 
 	for input, output := range inputOutputWithDefaults {
 		urlNew, err := MakeURL("https", "/hello", input, 9200)
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		assert.Equal(t, output, urlNew)
 	}
 }
@@ -93,7 +111,59 @@ func TestURLParamsEncode(t *testing.T) {
 	for input, output := range inputOutputWithParams {
 		urlNew, err := MakeURL("", "", input, 5601)
 		urlWithParams := EncodeURLParams(urlNew, params)
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		assert.Equal(t, output, urlWithParams)
+	}
+}
+
+func TestParseURL(t *testing.T) {
+	tests := map[string]struct {
+		input           string
+		hints           []ParseHint
+		expected        string
+		errorAssertFunc require.ErrorAssertionFunc
+	}{
+		"http": {
+			"http://host:1234/path",
+			nil,
+			"http://host:1234/path",
+			require.NoError,
+		},
+		"https": {
+			"https://host:1234/path",
+			nil,
+			"https://host:1234/path",
+			require.NoError,
+		},
+		"no_scheme": {
+			"host:1234/path",
+			nil,
+			"http://host:1234/path",
+			require.NoError,
+		},
+		"default_scheme_https": {
+			"host:1234/path",
+			[]ParseHint{WithDefaultScheme("https")},
+			"https://host:1234/path",
+			require.NoError,
+		},
+		"invalid": {
+			"foobar:port",
+			nil,
+			"",
+			require.Error,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			u, err := ParseURL(test.input, test.hints...)
+			test.errorAssertFunc(t, err)
+			if test.expected != "" {
+				require.Equal(t, test.expected, u.String())
+			} else {
+				require.Nil(t, u)
+			}
+		})
 	}
 }

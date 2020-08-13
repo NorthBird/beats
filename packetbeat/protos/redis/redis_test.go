@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // +build !integration
 
 package redis
@@ -50,7 +67,29 @@ func TestRedisParser_ArrayRequest(t *testing.T) {
 	assert.True(t, complete)
 	assert.True(t, msg.isRequest)
 	assert.Equal(t, "SET key1 Hello", string(msg.message))
+	assert.Equal(t, "SET", string(msg.method))
+	assert.Equal(t, "key1", string(msg.path))
 	assert.Equal(t, len(arrayRequest), msg.size)
+}
+
+var arrayRequest2 = []byte("*3\r\n" +
+	"$6\r\n" +
+	"CONFIG\r\n" +
+	"$3\r\n" +
+	"GET\r\n" +
+	"$1\r\n" +
+	"*\r\n")
+
+func TestRedisParser_ArrayRequest2(t *testing.T) {
+	msg, ok, complete := parse(arrayRequest2)
+
+	assert.True(t, ok)
+	assert.True(t, complete)
+	assert.True(t, msg.isRequest)
+	assert.Equal(t, "CONFIG GET *", string(msg.message))
+	assert.Equal(t, "CONFIG GET", string(msg.method))
+	assert.Equal(t, "*", string(msg.path))
+	assert.Equal(t, len(arrayRequest2), msg.size)
 }
 
 var arrayResponse = []byte("*4\r\n" +

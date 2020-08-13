@@ -1,8 +1,26 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // +build integration
 
 package redis
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,17 +28,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/garyburd/redigo/redis"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/garyburd/redigo/redis"
-
-	"github.com/elastic/beats/libbeat/beat"
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/outputs"
-	"github.com/elastic/beats/libbeat/outputs/outest"
-
-	_ "github.com/elastic/beats/libbeat/outputs/codec/format"
-	_ "github.com/elastic/beats/libbeat/outputs/codec/json"
+	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/outputs"
+	_ "github.com/elastic/beats/v7/libbeat/outputs/codec/format"
+	_ "github.com/elastic/beats/v7/libbeat/outputs/codec/json"
+	"github.com/elastic/beats/v7/libbeat/outputs/outest"
 )
 
 const (
@@ -31,8 +47,14 @@ const (
 	SRedisDefaultPort = "6380"
 )
 
+const (
+	testBeatname    = "libbeat"
+	testBeatversion = "1.2.3"
+	testMetaValue   = "private"
+)
+
 func TestPublishListTCP(t *testing.T) {
-	key := "test_publist_tcp"
+	key := "test_publish_tcp"
 	db := 0
 	redisConfig := map[string]interface{}{
 		"hosts":    []string{getRedisAddr()},
@@ -46,7 +68,7 @@ func TestPublishListTCP(t *testing.T) {
 }
 
 func TestPublishListTLS(t *testing.T) {
-	key := "test_publist_tls"
+	key := "test_publish_tls"
 	db := 0
 	redisConfig := map[string]interface{}{
 		"hosts":    []string{getSRedisAddr()},
@@ -62,6 +84,44 @@ func TestPublishListTLS(t *testing.T) {
 	}
 
 	testPublishList(t, redisConfig)
+}
+
+func TestWithSchema(t *testing.T) {
+	redisURL := "redis://" + getRedisAddr()
+	sredisURL := "rediss://" + getSRedisAddr()
+
+	cases := map[string]struct {
+		host string
+	}{
+		"redis ignores ssl settings": {
+			host: redisURL,
+		},
+		"sredis schema sends via tls": {
+			host: sredisURL,
+		},
+	}
+
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			key := "test_publish_tls"
+			db := 0
+			redisConfig := map[string]interface{}{
+				"hosts":    []string{test.host},
+				"key":      key,
+				"db":       db,
+				"datatype": "list",
+				"timeout":  "5s",
+
+				"ssl.verification_mode": "full",
+				"ssl.certificate_authorities": []string{
+					"../../../testing/environments/docker/sredis/pki/tls/certs/sredis.crt",
+				},
+			}
+
+			testPublishList(t, redisConfig)
+		})
+	}
+
 }
 
 func testPublishList(t *testing.T, cfg map[string]interface{}) {
@@ -99,6 +159,10 @@ func testPublishList(t *testing.T, cfg map[string]interface{}) {
 		err = json.Unmarshal(raw, &evt)
 		assert.NoError(t, err)
 		assert.Equal(t, i+1, evt.Message)
+	}
+
+	for _, raw := range results {
+		validateMeta(t, raw)
 	}
 }
 
@@ -192,8 +256,6 @@ func testPublishChannel(t *testing.T, cfg map[string]interface{}) {
 	var messages [][]byte
 	assert.NoError(t, conn.Err())
 	for conn.Err() == nil {
-		t.Logf("try collect message")
-
 		switch v := psc.Receive().(type) {
 		case redis.Message:
 			messages = append(messages, v.Data)
@@ -228,6 +290,10 @@ func testPublishChannel(t *testing.T, cfg map[string]interface{}) {
 			assert.Equal(t, i+1, evt.Message)
 		}
 	}
+
+	for _, raw := range messages {
+		validateMeta(t, raw)
+	}
 }
 
 func getEnv(name, or string) string {
@@ -249,7 +315,7 @@ func getSRedisAddr() string {
 		getEnv("SREDIS_PORT", SRedisDefaultPort))
 }
 
-func newRedisTestingOutput(t *testing.T, cfg map[string]interface{}) *client {
+func newRedisTestingOutput(t *testing.T, cfg map[string]interface{}) outputs.Client {
 	config, err := common.NewConfigFrom(cfg)
 	if err != nil {
 		t.Fatalf("Error reading config: %v", err)
@@ -260,12 +326,12 @@ func newRedisTestingOutput(t *testing.T, cfg map[string]interface{}) *client {
 		t.Fatalf("redis output module not registered")
 	}
 
-	out, err := plugin(beat.Info{Beat: "libbeat"}, outputs.NewNilObserver(), config)
+	out, err := plugin(nil, beat.Info{Beat: testBeatname, Version: testBeatversion}, outputs.NewNilObserver(), config)
 	if err != nil {
 		t.Fatalf("Failed to initialize redis output: %v", err)
 	}
 
-	client := out.Clients[0].(*client)
+	client := out.Clients[0].(outputs.NetworkClient)
 	if err := client.Connect(); err != nil {
 		t.Fatalf("Failed to connect to redis host: %v", err)
 	}
@@ -273,7 +339,7 @@ func newRedisTestingOutput(t *testing.T, cfg map[string]interface{}) *client {
 	return client
 }
 
-func sendTestEvents(out *client, batches, N int) error {
+func sendTestEvents(out outputs.Client, batches, N int) error {
 	i := 1
 	for b := 0; b < batches; b++ {
 		events := make([]beat.Event, N)
@@ -283,7 +349,7 @@ func sendTestEvents(out *client, batches, N int) error {
 		}
 
 		batch := outest.NewBatch(events...)
-		err := out.Publish(batch)
+		err := out.Publish(context.Background(), batch)
 		if err != nil {
 			return err
 		}
@@ -295,6 +361,31 @@ func sendTestEvents(out *client, batches, N int) error {
 func createEvent(message int) beat.Event {
 	return beat.Event{
 		Timestamp: time.Now(),
-		Fields:    common.MapStr{"message": message},
+		Meta: common.MapStr{
+			"test": testMetaValue,
+		},
+		Fields: common.MapStr{"message": message},
 	}
+}
+
+func validateMeta(t *testing.T, raw []byte) {
+	// require metadata
+	type meta struct {
+		Beat    string `struct:"beat"`
+		Version string `struct:"version"`
+		Test    string `struct:"test"`
+	}
+
+	evt := struct {
+		Meta meta `json:"@metadata"`
+	}{}
+	err := json.Unmarshal(raw, &evt)
+	if err != nil {
+		t.Errorf("failed to unmarshal meta section: %v", err)
+		return
+	}
+
+	assert.Equal(t, testBeatname, evt.Meta.Beat)
+	assert.Equal(t, testBeatversion, evt.Meta.Version)
+	assert.Equal(t, testMetaValue, evt.Meta.Test)
 }

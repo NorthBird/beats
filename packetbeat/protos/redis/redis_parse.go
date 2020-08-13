@@ -1,11 +1,29 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package redis
 
 import (
+	"bytes"
 	"time"
 
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/common/streambuf"
-	"github.com/elastic/beats/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/common/streambuf"
+	"github.com/elastic/beats/v7/libbeat/logp"
 )
 
 type parser struct {
@@ -18,7 +36,7 @@ type redisMessage struct {
 	ts time.Time
 
 	tcpTuple     common.TCPTuple
-	cmdlineTuple *common.CmdlineTuple
+	cmdlineTuple *common.ProcessTuple
 	direction    uint8
 
 	isRequest bool
@@ -27,15 +45,11 @@ type redisMessage struct {
 	message   common.NetString
 	method    common.NetString
 	path      common.NetString
-
-	next *redisMessage
 }
 
-const (
-	start = iota
-	bulkArray
-	simpleMessage
-)
+func (msg *redisMessage) Size() int {
+	return len(msg.message)
+}
 
 var (
 	empty    = common.NetString("")
@@ -253,7 +267,7 @@ func (p *parser) parse(buf *streambuf.Buffer) (bool, bool) {
 	content, iserror, ok, complete := p.dispatch(0, buf)
 	if !ok || !complete {
 		// on error or incomplete message drop all parsing progress, due to
-		// parse not being statefull among multiple calls
+		// parse not being stateful among multiple calls
 		// => parser needs to restart parsing all content
 		buf.Restore(snapshot)
 		return ok, complete
@@ -410,11 +424,22 @@ func (p *parser) parseArray(depth int, buf *streambuf.Buffer) (common.NetString,
 	}
 
 	// handle top-level request command
-	if depth == 0 && isRedisCommand(content[0]) {
+	var oneWordCommand, twoWordsCommand bool
+	oneWordCommand = isRedisCommand(content[0])
+	twoWordsCommand = count > 1 && isRedisCommand(bytes.Join(content[0:2], []byte(" ")))
+
+	if depth == 0 && (oneWordCommand || twoWordsCommand) {
 		p.message.isRequest = true
-		p.message.method = content[0]
-		if len(content) > 1 {
-			p.message.path = content[1]
+		if oneWordCommand {
+			p.message.method = content[0]
+			if len(content) > 1 {
+				p.message.path = content[1]
+			}
+		} else if twoWordsCommand {
+			p.message.method = bytes.Join(content[0:2], []byte(" "))
+			if len(content) > 2 {
+				p.message.path = content[2]
+			}
 		}
 
 		var value common.NetString

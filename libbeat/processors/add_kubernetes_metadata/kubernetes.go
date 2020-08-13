@@ -1,205 +1,257 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
+// +build linux darwin windows
+
 package add_kubernetes_metadata
 
 import (
-	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
-	"github.com/elastic/beats/libbeat/beat"
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/common/bus"
-	"github.com/elastic/beats/libbeat/common/kubernetes"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/libbeat/processors"
+	k8sclient "k8s.io/client-go/kubernetes"
+
+	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/common/kubernetes"
+	"github.com/elastic/beats/v7/libbeat/common/kubernetes/metadata"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/processors"
 )
 
 const (
-	timeout = time.Second * 5
-)
-
-var (
-	fatalError = errors.New("Unable to create kubernetes processor")
+	timeout                = time.Second * 5
+	selector               = "kubernetes"
+	checkNodeReadyAttempts = 10
 )
 
 type kubernetesAnnotator struct {
-	sync.RWMutex
-	watcher        kubernetes.Watcher
-	startListener  bus.Listener
-	stopListener   bus.Listener
-	updateListener bus.Listener
-	indexers       *Indexers
-	matchers       *Matchers
-	metadata       map[string]common.MapStr
+	log                 *logp.Logger
+	watcher             kubernetes.Watcher
+	indexers            *Indexers
+	matchers            *Matchers
+	cache               *cache
+	kubernetesAvailable bool
+	initOnce            sync.Once
 }
 
 func init() {
-	processors.RegisterPlugin("add_kubernetes_metadata", newKubernetesAnnotator)
+	processors.RegisterPlugin("add_kubernetes_metadata", New)
 
 	// Register default indexers
 	Indexing.AddIndexer(PodNameIndexerName, NewPodNameIndexer)
+	Indexing.AddIndexer(PodUIDIndexerName, NewPodUIDIndexer)
 	Indexing.AddIndexer(ContainerIndexerName, NewContainerIndexer)
 	Indexing.AddIndexer(IPPortIndexerName, NewIPPortIndexer)
 	Indexing.AddMatcher(FieldMatcherName, NewFieldMatcher)
 	Indexing.AddMatcher(FieldFormatMatcherName, NewFieldFormatMatcher)
 }
 
-func newKubernetesAnnotator(cfg *common.Config) (processors.Processor, error) {
+func isKubernetesAvailable(client k8sclient.Interface) (bool, error) {
+	server, err := client.Discovery().ServerVersion()
+	if err != nil {
+		return false, err
+	}
+	logp.Info("%v: kubernetes env detected, with version: %v", "add_kubernetes_metadata", server)
+	return true, nil
+}
+
+func isKubernetesAvailableWithRetry(client k8sclient.Interface) bool {
+	connectionAttempts := 1
+	for {
+		kubernetesAvailable, err := isKubernetesAvailable(client)
+		if kubernetesAvailable {
+			return true
+		}
+		if connectionAttempts > checkNodeReadyAttempts {
+			logp.Info("%v: could not detect kubernetes env: %v", "add_kubernetes_metadata", err)
+			return false
+		}
+		time.Sleep(3 * time.Second)
+		connectionAttempts += 1
+	}
+}
+
+// New constructs a new add_kubernetes_metadata processor.
+func New(cfg *common.Config) (processors.Processor, error) {
+	config, err := newProcessorConfig(cfg, Indexing)
+	if err != nil {
+		return nil, err
+	}
+
+	log := logp.NewLogger(selector).With("libbeat.processor", "add_kubernetes_metadata")
+	processor := &kubernetesAnnotator{
+		log:                 log,
+		cache:               newCache(config.CleanupTimeout),
+		kubernetesAvailable: false,
+	}
+
+	// complete processor's initialisation asynchronously so as to re-try on failing k8s client initialisations in case
+	// the k8s node is not yet ready.
+	go processor.init(config, cfg)
+
+	return processor, nil
+}
+
+func newProcessorConfig(cfg *common.Config, register *Register) (kubeAnnotatorConfig, error) {
 	config := defaultKubernetesAnnotatorConfig()
 
 	err := cfg.Unpack(&config)
 	if err != nil {
-		return nil, fmt.Errorf("fail to unpack the kubernetes configuration: %s", err)
+		return config, fmt.Errorf("fail to unpack the kubernetes configuration: %s", err)
 	}
 
-	err = validate(config)
-	if err != nil {
-		return nil, err
+	//Load and append default indexer configs
+	if config.DefaultIndexers.Enabled {
+		config.Indexers = append(config.Indexers, register.GetDefaultIndexerConfigs()...)
 	}
 
-	//Load default indexer configs
-	if config.DefaultIndexers.Enabled == true {
-		Indexing.RLock()
-		for key, cfg := range Indexing.GetDefaultIndexerConfigs() {
-			config.Indexers = append(config.Indexers, map[string]common.Config{key: cfg})
-		}
-		Indexing.RUnlock()
+	//Load and append default matcher configs
+	if config.DefaultMatchers.Enabled {
+		config.Matchers = append(config.Matchers, register.GetDefaultMatcherConfigs()...)
 	}
 
-	//Load default matcher configs
-	if config.DefaultMatchers.Enabled == true {
-		Indexing.RLock()
-		for key, cfg := range Indexing.GetDefaultMatcherConfigs() {
-			config.Matchers = append(config.Matchers, map[string]common.Config{key: cfg})
-		}
-		Indexing.RUnlock()
-	}
+	return config, nil
+}
 
-	metaGen := kubernetes.NewMetaGenerator(config.IncludeAnnotations, config.IncludeLabels, config.ExcludeLabels)
-	indexers := NewIndexers(config.Indexers, metaGen)
-
-	matchers := NewMatchers(config.Matchers)
-
-	if matchers.Empty() {
-		return nil, fmt.Errorf("Can not initialize kubernetes plugin with zero matcher plugins")
-	}
-
-	client, err := kubernetes.GetKubernetesClient(config.InCluster, config.KubeConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	config.Host = kubernetes.DiscoverKubernetesNode(config.Host, config.InCluster, client)
-
-	logp.Debug("kubernetes", "Using host ", config.Host)
-	logp.Debug("kubernetes", "Initializing watcher")
-	if client != nil {
-		watcher := kubernetes.NewWatcher(client.CoreV1(), config.SyncPeriod, config.CleanupTimeout, config.Host)
-		start := watcher.ListenStart()
-		stop := watcher.ListenStop()
-		update := watcher.ListenUpdate()
-
-		processor := &kubernetesAnnotator{
-			watcher:        watcher,
-			indexers:       indexers,
-			matchers:       matchers,
-			metadata:       make(map[string]common.MapStr, 0),
-			startListener:  start,
-			stopListener:   stop,
-			updateListener: update,
+func (k *kubernetesAnnotator) init(config kubeAnnotatorConfig, cfg *common.Config) {
+	k.initOnce.Do(func() {
+		client, err := kubernetes.GetKubernetesClient(config.KubeConfig)
+		if err != nil {
+			if kubernetes.IsInCluster(config.KubeConfig) {
+				k.log.Debugf("Could not create kubernetes client using in_cluster config: %+v", err)
+			} else if config.KubeConfig == "" {
+				k.log.Debugf("Could not create kubernetes client using config: %v: %+v", os.Getenv("KUBECONFIG"), err)
+			} else {
+				k.log.Debugf("Could not create kubernetes client using config: %v: %+v", config.KubeConfig, err)
+			}
+			return
 		}
 
-		// Start worker
-		go processor.worker()
+		if !isKubernetesAvailableWithRetry(client) {
+			return
+		}
+
+		matchers := NewMatchers(config.Matchers)
+
+		if matchers.Empty() {
+			k.log.Debugf("Could not initialize kubernetes plugin with zero matcher plugins")
+			return
+		}
+
+		k.matchers = matchers
+
+		config.Host = kubernetes.DiscoverKubernetesNode(k.log, config.Host, kubernetes.IsInCluster(config.KubeConfig), client)
+
+		k.log.Debugf("Initializing a new Kubernetes watcher using host: %s", config.Host)
+
+		watcher, err := kubernetes.NewWatcher(client, &kubernetes.Pod{}, kubernetes.WatchOptions{
+			SyncTimeout: config.SyncPeriod,
+			Node:        config.Host,
+			Namespace:   config.Namespace,
+		}, nil)
+		if err != nil {
+			k.log.Errorf("Couldn't create kubernetes watcher for %T", &kubernetes.Pod{})
+			return
+		}
+
+		metaGen := metadata.NewPodMetadataGenerator(cfg, watcher.Store(), nil, nil)
+		k.indexers = NewIndexers(config.Indexers, metaGen)
+		k.watcher = watcher
+		k.kubernetesAvailable = true
+
+		watcher.AddEventHandler(kubernetes.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				pod := obj.(*kubernetes.Pod)
+				k.log.Debugf("Adding kubernetes pod: %s/%s", pod.GetNamespace(), pod.GetName())
+				k.addPod(pod)
+			},
+			UpdateFunc: func(obj interface{}) {
+				pod := obj.(*kubernetes.Pod)
+				k.log.Debugf("Updating kubernetes pod: %s/%s", pod.GetNamespace(), pod.GetName())
+				k.updatePod(pod)
+			},
+			DeleteFunc: func(obj interface{}) {
+				pod := obj.(*kubernetes.Pod)
+				k.log.Debugf("Removing pod: %s/%s", pod.GetNamespace(), pod.GetName())
+				k.removePod(pod)
+			},
+		})
 
 		if err := watcher.Start(); err != nil {
-			return nil, err
+			k.log.Debugf("add_kubernetes_metadata", "Couldn't start watcher: %v", err)
+			return
 		}
-		return processor, nil
-	}
-
-	return nil, fatalError
+	})
 }
 
 func (k *kubernetesAnnotator) Run(event *beat.Event) (*beat.Event, error) {
+	if !k.kubernetesAvailable {
+		return event, nil
+	}
 	index := k.matchers.MetadataIndex(event.Fields)
 	if index == "" {
+		k.log.Debug("No container match string, not adding kubernetes data")
 		return event, nil
 	}
 
-	k.RLock()
-	metadata := k.metadata[index]
-	k.RUnlock()
+	k.log.Debugf("Using the following index key %s", index)
+	metadata := k.cache.get(index)
 	if metadata == nil {
+		k.log.Debugf("Index key %s did not match any of the cached resources", index)
 		return event, nil
 	}
 
-	meta := common.MapStr{}
-	metaIface, ok := event.Fields["kubernetes"]
-	if !ok {
-		event.Fields["kubernetes"] = common.MapStr{}
-	} else {
-		meta = metaIface.(common.MapStr)
-	}
-
-	meta.Update(metadata)
-	event.Fields["kubernetes"] = meta
+	event.Fields.DeepUpdate(common.MapStr{
+		"kubernetes": metadata.Clone(),
+	})
 
 	return event, nil
 }
 
-// worker watches pod events and keeps a map of metadata
-func (k *kubernetesAnnotator) worker() {
-	for {
-		select {
-		case event := <-k.startListener.Events():
-			processEvent(k.addPod, event)
-
-		case event := <-k.stopListener.Events():
-			processEvent(k.removePod, event)
-
-		case event := <-k.updateListener.Events():
-			processEvent(k.removePod, event)
-			processEvent(k.addPod, event)
-		}
-	}
-}
-
-// Run pod actions while handling errors
-func processEvent(f func(pod *kubernetes.Pod), event bus.Event) {
-	pod, ok := event["pod"].(*kubernetes.Pod)
-	if !ok {
-		logp.Err("Couldn't get a pod from watcher event")
-		return
-	}
-	f(pod)
-}
-
 func (k *kubernetesAnnotator) addPod(pod *kubernetes.Pod) {
 	metadata := k.indexers.GetMetadata(pod)
-	k.Lock()
-	defer k.Unlock()
 	for _, m := range metadata {
-		k.metadata[m.Index] = m.Data
+		k.log.Debugf("Created index %s for pod %s/%s", m.Index, pod.GetNamespace(), pod.GetName())
+		k.cache.set(m.Index, m.Data)
 	}
+}
+
+func (k *kubernetesAnnotator) updatePod(pod *kubernetes.Pod) {
+	k.removePod(pod)
+
+	// Add it again only if it is not being deleted
+	if pod.GetObjectMeta().GetDeletionTimestamp() != nil {
+		k.log.Debugf("Removing kubernetes pod being terminated: %s/%s", pod.GetNamespace(), pod.GetName())
+		return
+	}
+
+	k.addPod(pod)
 }
 
 func (k *kubernetesAnnotator) removePod(pod *kubernetes.Pod) {
 	indexes := k.indexers.GetIndexes(pod)
-	k.Lock()
-	defer k.Unlock()
 	for _, idx := range indexes {
-		delete(k.metadata, idx)
+		k.cache.delete(idx)
 	}
 }
 
 func (*kubernetesAnnotator) String() string {
 	return "add_kubernetes_metadata"
-}
-
-func validate(config kubeAnnotatorConfig) error {
-	if !config.InCluster && config.KubeConfig == "" {
-		return errors.New("`kube_config` path can't be empty when in_cluster is set to false")
-	}
-	return nil
 }

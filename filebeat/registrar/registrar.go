@@ -1,93 +1,94 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package registrar
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/elastic/beats/filebeat/input/file"
-	helper "github.com/elastic/beats/libbeat/common/file"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/libbeat/monitoring"
-	"github.com/elastic/beats/libbeat/paths"
+	"github.com/pkg/errors"
+
+	"github.com/elastic/beats/v7/filebeat/input/file"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/monitoring"
+	"github.com/elastic/beats/v7/libbeat/statestore"
 )
 
 type Registrar struct {
-	Channel      chan []file.State
-	out          successLogger
-	done         chan struct{}
-	registryFile string // Path to the Registry File
-	wg           sync.WaitGroup
+	log *logp.Logger
 
-	states               *file.States // Map with all file paths inside and the corresponding state
-	flushTimeout         time.Duration
+	// registrar event input and output
+	Channel              chan []file.State
+	out                  successLogger
 	bufferedStateUpdates int
+
+	// shutdown handling
+	done chan struct{}
+	wg   sync.WaitGroup
+
+	// state storage
+	states       *file.States      // Map with all file paths inside and the corresponding state
+	store        *statestore.Store // Store keeps states in memory and on disk
+	flushTimeout time.Duration
+
+	gcEnabled, gcRequired bool
 }
 
 type successLogger interface {
 	Published(n int) bool
 }
 
-var (
-	statesUpdate   = monitoring.NewInt(nil, "registrar.states.update")
-	statesCleanup  = monitoring.NewInt(nil, "registrar.states.cleanup")
-	statesCurrent  = monitoring.NewInt(nil, "registrar.states.current")
-	registryWrites = monitoring.NewInt(nil, "registrar.writes")
-)
-
-func New(registryFile string, flushTimeout time.Duration, out successLogger) (*Registrar, error) {
-	r := &Registrar{
-		registryFile: registryFile,
-		done:         make(chan struct{}),
-		states:       file.NewStates(),
-		Channel:      make(chan []file.State, 1),
-		flushTimeout: flushTimeout,
-		out:          out,
-		wg:           sync.WaitGroup{},
-	}
-	err := r.Init()
-
-	return r, err
+type StateStore interface {
+	Access() (*statestore.Store, error)
 }
 
-// Init sets up the Registrar and make sure the registry file is setup correctly
-func (r *Registrar) Init() error {
-	// The registry file is opened in the data path
-	r.registryFile = paths.Resolve(paths.Data, r.registryFile)
+var (
+	statesUpdate    = monitoring.NewInt(nil, "registrar.states.update")
+	statesCleanup   = monitoring.NewInt(nil, "registrar.states.cleanup")
+	statesCurrent   = monitoring.NewInt(nil, "registrar.states.current")
+	registryWrites  = monitoring.NewInt(nil, "registrar.writes.total")
+	registryFails   = monitoring.NewInt(nil, "registrar.writes.fail")
+	registrySuccess = monitoring.NewInt(nil, "registrar.writes.success")
+)
 
-	// Create directory if it does not already exist.
-	registryPath := filepath.Dir(r.registryFile)
-	err := os.MkdirAll(registryPath, 0750)
+const fileStatePrefix = "filebeat::logs::"
+
+// New creates a new Registrar instance, updating the registry file on
+// `file.State` updates. New fails if the file can not be opened or created.
+func New(stateStore StateStore, out successLogger, flushTimeout time.Duration) (*Registrar, error) {
+	store, err := stateStore.Access()
 	if err != nil {
-		return fmt.Errorf("Failed to created registry file dir %s: %v", registryPath, err)
+		return nil, err
 	}
 
-	// Check if files exists
-	fileInfo, err := os.Lstat(r.registryFile)
-	if os.IsNotExist(err) {
-		logp.Info("No registry file found under: %s. Creating a new registry file.", r.registryFile)
-		// No registry exists yet, write empty state to check if registry can be written
-		return r.writeRegistry()
+	r := &Registrar{
+		log:          logp.NewLogger("registrar"),
+		Channel:      make(chan []file.State, 1),
+		out:          out,
+		done:         make(chan struct{}),
+		wg:           sync.WaitGroup{},
+		states:       file.NewStates(),
+		store:        store,
+		flushTimeout: flushTimeout,
 	}
-	if err != nil {
-		return err
-	}
-
-	// Check if regular file, no dir, no symlink
-	if !fileInfo.Mode().IsRegular() {
-		// Special error message for directory
-		if fileInfo.IsDir() {
-			return fmt.Errorf("Registry file path must be a file. %s is a directory.", r.registryFile)
-		}
-		return fmt.Errorf("Registry file path is not a regular file: %s", r.registryFile)
-	}
-
-	logp.Debug("registrar", "Registry file set to: %s", r.registryFile)
-
-	return nil
+	return r, nil
 }
 
 // GetStates return the registrar states
@@ -98,161 +99,213 @@ func (r *Registrar) GetStates() []file.State {
 // loadStates fetches the previous reading state from the configure RegistryFile file
 // The default file is `registry` in the data path.
 func (r *Registrar) loadStates() error {
-	f, err := os.Open(r.registryFile)
+	states, err := readStatesFrom(r.store)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "can not load filebeat registry state")
 	}
 
-	defer f.Close()
-
-	logp.Info("Loading registrar data from %s", r.registryFile)
-
-	decoder := json.NewDecoder(f)
-	states := []file.State{}
-	err = decoder.Decode(&states)
-	if err != nil {
-		return fmt.Errorf("Error decoding states: %s", err)
-	}
-
-	states = resetStates(states)
 	r.states.SetStates(states)
-	logp.Info("States Loaded from registrar: %+v", len(states))
+	r.log.Infof("States Loaded from registrar: %+v", len(states))
 
 	return nil
-}
-
-// resetStates sets all states to finished and disable TTL on restart
-// For all states covered by an input, TTL will be overwritten with the input value
-func resetStates(states []file.State) []file.State {
-	for key, state := range states {
-		state.Finished = true
-		// Set ttl to -2 to easily spot which states are not managed by a input
-		state.TTL = -2
-		states[key] = state
-	}
-	return states
 }
 
 func (r *Registrar) Start() error {
 	// Load the previous log file locations now, for use in input
 	err := r.loadStates()
 	if err != nil {
-		return fmt.Errorf("Error loading state: %v", err)
+		return fmt.Errorf("error loading state: %v", err)
 	}
 
 	r.wg.Add(1)
-	go r.Run()
+	go func() {
+		defer r.wg.Done()
+		r.Run()
+	}()
 
 	return nil
 }
 
+// Stop stops the registry. It waits until Run function finished.
+func (r *Registrar) Stop() {
+	r.log.Info("Stopping Registrar")
+	defer r.log.Info("Registrar stopped")
+
+	close(r.done)
+	r.wg.Wait()
+}
+
 func (r *Registrar) Run() {
-	logp.Debug("registrar", "Starting Registrar")
-	// Writes registry on shutdown
+	r.log.Debug("Starting Registrar")
+	defer r.log.Debug("Stopping Registrar")
+
+	defer r.store.Close()
+
 	defer func() {
-		r.writeRegistry()
-		r.wg.Done()
+		writeStates(r.store, r.states.GetStates())
 	}()
 
 	var (
 		timer  *time.Timer
 		flushC <-chan time.Time
+
+		directIn  chan []file.State
+		collectIn chan []file.State
 	)
+
+	if r.flushTimeout <= 0 {
+		directIn = r.Channel
+	} else {
+		collectIn = r.Channel
+	}
 
 	for {
 		select {
 		case <-r.done:
-			logp.Info("Ending Registrar")
+			r.log.Info("Ending Registrar")
 			return
-		case <-flushC:
-			flushC = nil
-			timer.Stop()
-			r.flushRegistry()
-		case states := <-r.Channel:
+
+		case states := <-directIn:
+			// no flush timeout configured. Directly update registry
 			r.onEvents(states)
-			if r.flushTimeout <= 0 {
-				r.flushRegistry()
-			} else if flushC == nil {
+			r.commitStateUpdates()
+
+		case states := <-collectIn:
+			// flush timeout configured. Only update internal state and track pending
+			// updates to be written to registry.
+			r.onEvents(states)
+			if flushC == nil && len(states) > 0 {
 				timer = time.NewTimer(r.flushTimeout)
 				flushC = timer.C
 			}
+
+		case <-flushC:
+			timer.Stop()
+			r.commitStateUpdates()
+
+			flushC = nil
+			timer = nil
 		}
 	}
 }
 
-// onEvents processes events received from the publisher pipeline
-func (r *Registrar) onEvents(states []file.State) {
-	r.processEventStates(states)
+func (r *Registrar) commitStateUpdates() {
+	// First clean up states
+	r.gcStates()
+	states := r.states.GetStates()
+	statesCurrent.Set(int64(len(states)))
 
-	beforeCount := r.states.Count()
-	cleanedStates := r.states.Cleanup()
-	statesCleanup.Add(int64(cleanedStates))
+	registryWrites.Inc()
 
-	r.bufferedStateUpdates += len(states)
+	r.log.Debugf("Registry file updated. %d active states.", len(states))
+	registrySuccess.Inc()
 
-	logp.Debug("registrar",
-		"Registrar states cleaned up. Before: %d, After: %d",
-		beforeCount, beforeCount-cleanedStates)
-}
-
-// processEventStates gets the states from the events and writes them to the registrar state
-func (r *Registrar) processEventStates(states []file.State) {
-	logp.Debug("registrar", "Processing %d events", len(states))
-
-	for i := range states {
-		r.states.Update(states[i])
-		statesUpdate.Add(1)
-	}
-}
-
-// Stop stops the registry. It waits until Run function finished.
-func (r *Registrar) Stop() {
-	logp.Info("Stopping Registrar")
-	close(r.done)
-	r.wg.Wait()
-}
-
-func (r *Registrar) flushRegistry() {
-	if err := r.writeRegistry(); err != nil {
-		logp.Err("Writing of registry returned error: %v. Continuing...", err)
+	if err := writeStates(r.store, states); err != nil {
+		r.log.Errorf("Error writing registrar state to statestore: %v", err)
+		registryFails.Inc()
 	}
 
 	if r.out != nil {
 		r.out.Published(r.bufferedStateUpdates)
 	}
 	r.bufferedStateUpdates = 0
+
 }
 
-// writeRegistry writes the new json registry file to disk.
-func (r *Registrar) writeRegistry() error {
-	logp.Debug("registrar", "Write registry file: %s", r.registryFile)
+// onEvents processes events received from the publisher pipeline
+func (r *Registrar) onEvents(states []file.State) {
+	r.processEventStates(states)
+	r.bufferedStateUpdates += len(states)
 
-	tempfile := r.registryFile + ".new"
-	f, err := os.OpenFile(tempfile, os.O_RDWR|os.O_CREATE|os.O_TRUNC|os.O_SYNC, 0600)
-	if err != nil {
-		logp.Err("Failed to create tempfile (%s) for writing: %s", tempfile, err)
-		return err
+	// check if we need to enable state cleanup
+	if !r.gcEnabled {
+		for i := range states {
+			if states[i].TTL >= 0 || states[i].Finished {
+				r.gcEnabled = true
+				break
+			}
+		}
 	}
 
-	// First clean up states
-	states := r.states.GetStates()
+	r.log.Debugf("Registrar state updates processed. Count: %v", len(states))
 
-	encoder := json.NewEncoder(f)
-	err = encoder.Encode(states)
-	if err != nil {
-		f.Close()
-		logp.Err("Error when encoding the states: %s", err)
-		return err
+	// new set of events received -> mark state registry ready for next
+	// cleanup phase in case gc'able events are stored in the registry.
+	r.gcRequired = r.gcEnabled
+}
+
+// gcStates runs a registry Cleanup. The method check if more event in the
+// registry can be gc'ed in the future. If no potential removable state is found,
+// the gcEnabled flag is set to false, indicating the current registrar state being
+// stable. New registry update events can re-enable state gc'ing.
+func (r *Registrar) gcStates() {
+	if !r.gcRequired {
+		return
 	}
 
-	// Directly close file because of windows
-	f.Close()
+	beforeCount := r.states.Count()
+	cleanedStates, pendingClean := r.states.CleanupWith(func(id string) {
+		// TODO: report error
+		r.store.Remove(fileStatePrefix + id)
+	})
+	statesCleanup.Add(int64(cleanedStates))
 
-	err = helper.SafeFileRotate(r.registryFile, tempfile)
+	r.log.Debugf(
+		"Registrar states cleaned up. Before: %d, After: %d, Pending: %d",
+		beforeCount, beforeCount-cleanedStates, pendingClean)
 
-	logp.Debug("registrar", "Registry file updated. %d states written.", len(states))
-	registryWrites.Add(1)
-	statesCurrent.Set(int64(len(states)))
+	r.gcRequired = false
+	r.gcEnabled = pendingClean > 0
+}
 
-	return err
+// processEventStates gets the states from the events and writes them to the registrar state
+func (r *Registrar) processEventStates(states []file.State) {
+	r.log.Debugf("Processing %d events", len(states))
+
+	ts := time.Now()
+	for i := range states {
+		r.states.UpdateWithTs(states[i], ts)
+		statesUpdate.Add(1)
+	}
+}
+
+func readStatesFrom(store *statestore.Store) ([]file.State, error) {
+	var states []file.State
+
+	err := store.Each(func(key string, dec statestore.ValueDecoder) (bool, error) {
+		if !strings.HasPrefix(key, fileStatePrefix) {
+			return true, nil
+		}
+
+		// try to decode. Ingore faulty/incompatible values.
+		var st file.State
+		if err := dec.Decode(&st); err != nil {
+			// XXX: Do we want to log here? In case we start to store other
+			// state types in the registry, then this operation will likely fail
+			// quite often, producing some false-positives in the logs...
+			return true, nil
+		}
+
+		st.Id = key[len(fileStatePrefix):]
+		states = append(states, st)
+		return true, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	states = fixStates(states)
+	states = resetStates(states)
+	return states, nil
+}
+
+func writeStates(store *statestore.Store, states []file.State) error {
+	for i := range states {
+		key := fileStatePrefix + states[i].Id
+		if err := store.Set(key, states[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

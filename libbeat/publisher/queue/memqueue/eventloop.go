@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package memqueue
 
 import (
@@ -9,7 +26,7 @@ import (
 // directEventLoop implements the broker main event loop. It buffers events,
 // but tries to forward events as early as possible.
 type directEventLoop struct {
-	broker *Broker
+	broker *broker
 
 	buf ringBuffer
 
@@ -28,7 +45,7 @@ type directEventLoop struct {
 // bufferingEventLoop implements the broker main event loop.
 // Events in the buffer are forwarded to consumers only if the buffer is full or on flush timeout.
 type bufferingEventLoop struct {
-	broker *Broker
+	broker *broker
 
 	buf        *batchBuffer
 	flushList  flushList
@@ -60,7 +77,7 @@ type flushList struct {
 	count int
 }
 
-func newDirectEventLoop(b *Broker, size int) *directEventLoop {
+func newDirectEventLoop(b *broker, size int) *directEventLoop {
 	l := &directEventLoop{
 		broker:    b,
 		events:    b.events,
@@ -87,7 +104,7 @@ func (l *directEventLoop) run() {
 		case req := <-l.events: // producer pushing new event
 			l.handleInsert(&req)
 
-		case req := <-l.pubCancel: // producer cancellig active events
+		case req := <-l.pubCancel: // producer cancelling active events
 			l.handleCancel(&req)
 
 		case req := <-l.get: // consumer asking for next batch
@@ -268,7 +285,7 @@ func (l *directEventLoop) processACK(lst chanList, N int) {
 	}
 }
 
-func newBufferingEventLoop(b *Broker, size int, minEvents int, flushTimeout time.Duration) *bufferingEventLoop {
+func newBufferingEventLoop(b *broker, size int, minEvents int, flushTimeout time.Duration) *bufferingEventLoop {
 	l := &bufferingEventLoop{
 		broker:       b,
 		maxEvents:    size,

@@ -15,7 +15,7 @@
 ifdef::standalone[]
 
 [[yaml-tips]]
-== YAML tips and gotchas
+== Avoid YAML formatting problems
 
 endif::[]
 
@@ -43,25 +43,26 @@ simply uncomment the line and change the values.
 
 You can test your configuration file to verify that the structure is valid.
 Simply change to the directory where the binary is installed, and run
-the Beat in the foreground with the `-configtest` flag specified. For example:
+the Beat in the foreground with the `test config` command specified. For
+example:
 
-ifdef::allplatforms[]
-
-["source","shell",subs="attributes"]
-----------------------------------------------------------------------
-{beatname_lc} -c {beatname_lc}.yml -configtest
-----------------------------------------------------------------------
-
-endif::allplatforms[]
-
-ifdef::win[]
+ifndef::win-only[]
 
 ["source","shell",subs="attributes"]
 ----------------------------------------------------------------------
-.\winlogbeat.exe -c .\winlogbeat.yml -configtest -e
+{beatname_lc} test config -c {beatname_lc}.yml
 ----------------------------------------------------------------------
 
-endif::win[]
+endif::win-only[]
+
+ifdef::win-only[]
+
+["source","shell",subs="attributes"]
+----------------------------------------------------------------------
+.\winlogbeat.exe test config -c .\winlogbeat.yml -e
+----------------------------------------------------------------------
+
+endif::win-only[]
 
 You'll see a message if the Beat finds an error in the file.
 
@@ -93,3 +94,21 @@ to an integer. If not, it's converted to a float.
 To prevent unwanted type conversions, avoid using leading zeros in field values,
 or wrap the values in single quotation marks.
 
+[float]
+[[dollar-sign-strings]]
+=== Avoid accidental template variable resolution
+
+The templating engine that allows the config to resolve data from environment 
+variables can result in errors in strings with `$` characters. For example, if a 
+password field contains `$$`, the engine will resolve this to `$`.
+
+To work around this,
+either use the
+ifdef::no_keystore[]
+{filebeat-ref}/keystore.html[keystore]
+endif::[]
+ifndef::no_keystore[]
+<<keystore>>
+endif::[]
+or escape all instances of
+`$` with `$$`.

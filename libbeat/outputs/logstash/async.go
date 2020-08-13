@@ -1,25 +1,48 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package logstash
 
 import (
+	"context"
+	"errors"
 	"net"
+	"sync"
 	"time"
 
-	"github.com/elastic/beats/libbeat/beat"
-	"github.com/elastic/beats/libbeat/common/atomic"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/libbeat/outputs"
-	"github.com/elastic/beats/libbeat/outputs/transport"
-	"github.com/elastic/beats/libbeat/publisher"
-	"github.com/elastic/go-lumber/client/v2"
+	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/common/atomic"
+	"github.com/elastic/beats/v7/libbeat/common/transport"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/outputs"
+	"github.com/elastic/beats/v7/libbeat/publisher"
+	v2 "github.com/elastic/go-lumber/client/v2"
 )
 
 type asyncClient struct {
+	log *logp.Logger
 	*transport.Client
 	observer outputs.Observer
 	client   *v2.AsyncClient
 	win      *window
 
 	connect func() error
+
+	mutex sync.Mutex
 }
 
 type msgRef struct {
@@ -38,7 +61,10 @@ func newAsyncClient(
 	observer outputs.Observer,
 	config *Config,
 ) (*asyncClient, error) {
+
+	log := logp.NewLogger("logstash")
 	c := &asyncClient{
+		log:      log,
 		Client:   conn,
 		observer: observer,
 	}
@@ -48,10 +74,10 @@ func newAsyncClient(
 	}
 
 	if config.TTL != 0 {
-		logp.Warn(`The async Logstash client does not support the "ttl" option`)
+		log.Warn(`The async Logstash client does not support the "ttl" option`)
 	}
 
-	enc := makeLogstashEventEncoder(beat, config.Index)
+	enc := makeLogstashEventEncoder(log, beat, config.EscapeHTML, config.Index)
 
 	queueSize := config.Pipelining - 1
 	timeout := config.Timeout
@@ -91,12 +117,16 @@ func makeClientFactory(
 }
 
 func (c *asyncClient) Connect() error {
-	logp.Debug("logstash", "connect")
+	c.log.Debug("connect")
 	return c.connect()
 }
 
 func (c *asyncClient) Close() error {
-	logp.Debug("logstash", "close connection")
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.log.Debug("close connection")
+
 	if c.client != nil {
 		err := c.client.Close()
 		c.client = nil
@@ -105,7 +135,7 @@ func (c *asyncClient) Close() error {
 	return c.Client.Close()
 }
 
-func (c *asyncClient) Publish(batch publisher.Batch) error {
+func (c *asyncClient) Publish(_ context.Context, batch publisher.Batch) error {
 	st := c.observer
 	events := batch.Events()
 	st.NewBatch(len(events))
@@ -139,7 +169,7 @@ func (c *asyncClient) Publish(batch publisher.Batch) error {
 			n, err = c.publishWindowed(ref, events)
 		}
 
-		debugf("%v events out of %v events sent to logstash host %s. Continue sending",
+		c.log.Debugf("%v events out of %v events sent to logstash host %s. Continue sending",
 			n, len(events), c.Host())
 
 		events = events[n:]
@@ -152,6 +182,10 @@ func (c *asyncClient) Publish(batch publisher.Batch) error {
 	return nil
 }
 
+func (c *asyncClient) String() string {
+	return "async(" + c.Client.String() + ")"
+}
+
 func (c *asyncClient) publishWindowed(
 	ref *msgRef,
 	events []publisher.Event,
@@ -159,7 +193,7 @@ func (c *asyncClient) publishWindowed(
 	batchSize := len(events)
 	windowSize := c.win.get()
 
-	debugf("Try to publish %v events to logstash host %s with window size %v",
+	c.log.Debugf("Try to publish %v events to logstash host %s with window size %v",
 		batchSize, c.Host(), windowSize)
 
 	// prepare message payload
@@ -176,12 +210,23 @@ func (c *asyncClient) publishWindowed(
 }
 
 func (c *asyncClient) sendEvents(ref *msgRef, events []publisher.Event) error {
+	client := c.getClient()
+	if client == nil {
+		return errors.New("connection closed")
+	}
 	window := make([]interface{}, len(events))
 	for i := range events {
 		window[i] = &events[i].Content
 	}
 	ref.count.Inc()
-	return c.client.Send(ref.callback, window)
+	return client.Send(ref.callback, window)
+}
+
+func (c *asyncClient) getClient() *v2.AsyncClient {
+	c.mutex.Lock()
+	client := c.client
+	c.mutex.Unlock()
+	return client
 }
 
 func (r *msgRef) callback(seq uint32, err error) {
@@ -232,5 +277,5 @@ func (r *msgRef) dec() {
 	}
 
 	r.batch.RetryEvents(r.slice)
-	logp.Err("Failed to publish events caused by: %v", err)
+	r.client.log.Errorf("Failed to publish events caused by: %+v", err)
 }

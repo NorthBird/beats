@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package memqueue
 
 // ackLoop implements the brokers asynchronous ACK worker.
@@ -6,7 +23,7 @@ package memqueue
 // broker event loop.
 // Producer ACKs are run in the ackLoop go-routine.
 type ackLoop struct {
-	broker *Broker
+	broker *broker
 	sig    chan batchAckMsg
 	lst    chanList
 
@@ -19,7 +36,7 @@ type ackLoop struct {
 	processACK func(chanList, int)
 }
 
-func newACKLoop(b *Broker, processACK func(chanList, int)) *ackLoop {
+func newACKLoop(b *broker, processACK func(chanList, int)) *ackLoop {
 	l := &ackLoop{broker: b}
 	l.processACK = processACK
 	return l
@@ -32,7 +49,7 @@ func (l *ackLoop) run() {
 		// Buffer up acked event counter in acked. If acked > 0, acks will be set to
 		// the broker.acks channel for sending the ACKs while potentially receiving
 		// new batches from the broker event loop.
-		// This concurrent bidirectionaly communication pattern requiring 'select'
+		// This concurrent bidirectionally communication pattern requiring 'select'
 		// ensures we can not have any deadlock between the event loop and the ack
 		// loop, as the ack loop will not block on any channel
 		acked int
@@ -95,8 +112,8 @@ func (l *ackLoop) handleBatchSig() int {
 	}
 
 	if count > 0 {
-		if e := l.broker.eventer; e != nil {
-			e.OnACK(count)
+		if listener := l.broker.ackListener; listener != nil {
+			listener.OnACK(count)
 		}
 
 		// report acks to waiting clients

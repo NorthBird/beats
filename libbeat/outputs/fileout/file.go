@@ -1,16 +1,34 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package fileout
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
-	"github.com/elastic/beats/libbeat/beat"
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/common/file"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/libbeat/outputs"
-	"github.com/elastic/beats/libbeat/outputs/codec"
-	"github.com/elastic/beats/libbeat/publisher"
+	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/common/file"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/outputs"
+	"github.com/elastic/beats/v7/libbeat/outputs/codec"
+	"github.com/elastic/beats/v7/libbeat/publisher"
 )
 
 func init() {
@@ -18,6 +36,8 @@ func init() {
 }
 
 type fileOutput struct {
+	log      *logp.Logger
+	filePath string
 	beat     beat.Info
 	observer outputs.Observer
 	rotator  *file.Rotator
@@ -26,6 +46,7 @@ type fileOutput struct {
 
 // makeFileout instantiates a new file output instance.
 func makeFileout(
+	_ outputs.IndexManager,
 	beat beat.Info,
 	observer outputs.Observer,
 	cfg *common.Config,
@@ -39,6 +60,7 @@ func makeFileout(
 	cfg.SetInt("bulk_max_size", -1, -1)
 
 	fo := &fileOutput{
+		log:      logp.NewLogger("file"),
 		beat:     beat,
 		observer: observer,
 	}
@@ -57,12 +79,15 @@ func (out *fileOutput) init(beat beat.Info, c config) error {
 		path = filepath.Join(c.Path, out.beat.Beat)
 	}
 
+	out.filePath = path
+
 	var err error
 	out.rotator, err = file.NewFileRotator(
 		path,
 		file.MaxSizeBytes(c.RotateEveryKb*1024),
 		file.MaxBackups(c.NumberOfFiles),
 		file.Permissions(os.FileMode(c.Permissions)),
+		file.WithLogger(logp.NewLogger("rotator").With(logp.Namespace("rotator"))),
 	)
 	if err != nil {
 		return err
@@ -73,7 +98,7 @@ func (out *fileOutput) init(beat beat.Info, c config) error {
 		return err
 	}
 
-	logp.Info("Initialized file output. "+
+	out.log.Infof("Initialized file output. "+
 		"path=%v max_size_bytes=%v max_backups=%v permissions=%v",
 		path, c.RotateEveryKb*1024, c.NumberOfFiles, os.FileMode(c.Permissions))
 
@@ -85,9 +110,7 @@ func (out *fileOutput) Close() error {
 	return out.rotator.Close()
 }
 
-func (out *fileOutput) Publish(
-	batch publisher.Batch,
-) error {
+func (out *fileOutput) Publish(_ context.Context, batch publisher.Batch) error {
 	defer batch.ACK()
 
 	st := out.observer
@@ -101,10 +124,11 @@ func (out *fileOutput) Publish(
 		serializedEvent, err := out.codec.Encode(out.beat.Beat, &event.Content)
 		if err != nil {
 			if event.Guaranteed() {
-				logp.Critical("Failed to serialize the event: %v", err)
+				out.log.Errorf("Failed to serialize the event: %+v", err)
 			} else {
-				logp.Warn("Failed to serialize the event: %v", err)
+				out.log.Warnf("Failed to serialize the event: %+v", err)
 			}
+			out.log.Debugf("Failed event: %v", event)
 
 			dropped++
 			continue
@@ -114,9 +138,9 @@ func (out *fileOutput) Publish(
 			st.WriteError(err)
 
 			if event.Guaranteed() {
-				logp.Critical("Writing event to file failed with: %v", err)
+				out.log.Errorf("Writing event to file failed with: %+v", err)
 			} else {
-				logp.Warn("Writing event to file failed with: %v", err)
+				out.log.Warnf("Writing event to file failed with: %+v", err)
 			}
 
 			dropped++
@@ -130,4 +154,8 @@ func (out *fileOutput) Publish(
 	st.Acked(len(events) - dropped)
 
 	return nil
+}
+
+func (out *fileOutput) String() string {
+	return "file(" + out.filePath + ")"
 }

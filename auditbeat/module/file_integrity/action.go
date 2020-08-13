@@ -1,8 +1,27 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package file_integrity
 
 import (
 	"math/bits"
 	"strings"
+
+	"github.com/elastic/beats/v7/libbeat/common"
 )
 
 // Action is a description of the changes described by an event.
@@ -20,6 +39,7 @@ const (
 	Updated
 	Moved
 	ConfigChange
+	InitialScan
 )
 
 var actionNames = map[Action]string{
@@ -30,6 +50,18 @@ var actionNames = map[Action]string{
 	Updated:            "updated",
 	Moved:              "moved",
 	ConfigChange:       "config_change",
+	InitialScan:        "initial_scan",
+}
+
+var ecsActionNames = map[Action]string{
+	None:               "info",
+	AttributesModified: "change",
+	Created:            "creation",
+	Deleted:            "deletion",
+	Updated:            "change",
+	Moved:              "change",
+	ConfigChange:       "change",
+	InitialScan:        "info",
 }
 
 type actionOrderKey struct {
@@ -81,6 +113,22 @@ func (action Action) String() string {
 		list = append(list, "unknown")
 	}
 	return strings.Join(list, "|")
+}
+
+// ECSTypes returns the ECS categorization types associated with the
+// particular action.
+func (action Action) ECSTypes() []string {
+	if name, found := ecsActionNames[action]; found {
+		return []string{name}
+	}
+	var list []string
+	for flag, name := range ecsActionNames {
+		if action&flag != 0 {
+			action ^= flag
+			list = append(list, name)
+		}
+	}
+	return common.MakeStringSet(list...).ToSlice()
 }
 
 // MarshalText marshals the Action to a textual representation of itself.
@@ -154,4 +202,14 @@ func (actions ActionArray) StringArray() []string {
 		result[index] = value.String()
 	}
 	return result
+}
+
+// ECSTypes returns the array of ECS categorization types for
+// the set of actions.
+func (actions ActionArray) ECSTypes() []string {
+	var list []string
+	for _, action := range actions {
+		list = append(list, action.ECSTypes()...)
+	}
+	return common.MakeStringSet(list...).ToSlice()
 }

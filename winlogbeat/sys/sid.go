@@ -1,7 +1,25 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package sys
 
 import (
 	"fmt"
+	"strconv"
 )
 
 // SID represents the Windows Security Identifier for an account.
@@ -34,6 +52,7 @@ const (
 	SidTypeUnknown
 	SidTypeComputer
 	SidTypeLabel
+	SidTypeLogonSession
 )
 
 // sidTypeToString is a mapping of SID types to their string representations.
@@ -48,9 +67,15 @@ var sidTypeToString = map[SIDType]string{
 	SidTypeUnknown:        "Unknown",
 	SidTypeComputer:       "Computer",
 	SidTypeLabel:          "Label",
+	SidTypeLogonSession:   "Logon Session",
 }
 
 // String returns string representation of SIDType.
 func (st SIDType) String() string {
-	return sidTypeToString[st]
+	if typ, found := sidTypeToString[st]; found {
+		return typ
+	} else if st > 0 {
+		return strconv.FormatUint(uint64(st), 10)
+	}
+	return ""
 }

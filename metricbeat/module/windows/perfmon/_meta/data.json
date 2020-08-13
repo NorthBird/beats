@@ -1,36 +1,30 @@
 {
-    "@timestamp": "2016-05-23T08:05:34.853Z",
-    "beat": {
-        "hostname": "host.example.com",
-        "name": "host.example.com"
+    "@timestamp": "2017-10-12T08:05:34.853Z",
+    "event": {
+        "dataset": "windows.perfmon",
+        "duration": 115000,
+        "module": "windows"
     },
     "metricset": {
-        "module": "windows",
         "name": "perfmon",
-        "rtt": 115
+        "period": 10000
     },
-    "type": "metricsets",
+    "service": {
+        "type": "windows"
+    },
     "windows": {
         "perfmon": {
-            "disk": {
-                "bytes": {
-                    "read": {
-                        "total": 0
+            "instance": "_Total",
+            "metrics": {
+                "processor": {
+                    "time": {
+                        "total": {
+                            "pct": 6.310940413107646
+                        }
                     }
                 }
             },
-            "processor": {
-                "time": {
-                    "idle": {
-                        "average": {
-                            "ns": 670661.5894039735
-                        }
-                    },
-                    "total": {
-                        "pct": 3.135058464112306
-                    }
-                }
-            }
+            "object": "Processor Information"
         }
     }
 }

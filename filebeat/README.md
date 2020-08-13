@@ -6,9 +6,9 @@ Together with the libbeat lumberjack output is a replacement for [logstash-forwa
 To learn more about Filebeat, check out https://www.elastic.co/products/beats/filebeat.
 
 
-## Getting started
+## Quick start
 
-Please follow the [getting started](https://www.elastic.co/guide/en/beats/filebeat/current/filebeat-getting-started.html)
+Please follow the [quick start](https://www.elastic.co/guide/en/beats/filebeat/current/filebeat-installation-configuration.html)
 guide from the docs.
 
 ## Documentation
@@ -30,7 +30,3 @@ If you are sure you found a bug or have a feature request, open an issue on
 
 We love contributions from our community! Please read the
 [CONTRIBUTING.md](../CONTRIBUTING.md) file.
-
-## Snapshots
-
-For testing purposes, we generate snapshot builds that you can find [here](https://beats-nightlies.s3.amazonaws.com/index.html?prefix=filebeat). Please be aware that these are built on top of master and are not meant for production.

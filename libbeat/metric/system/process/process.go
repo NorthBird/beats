@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // +build darwin freebsd linux windows
 
 package process
@@ -12,10 +29,10 @@ import (
 
 	"github.com/pkg/errors"
 
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/common/match"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/libbeat/metric/system/memory"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/common/match"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/metric/system/memory"
 	sigar "github.com/elastic/gosigar"
 )
 
@@ -28,14 +45,16 @@ type ProcsMap map[int]*Process
 // Process is the structure which holds the information of a process running on the host.
 // It includes pid, gid and it interacts with gosigar to fetch process data from the host.
 type Process struct {
-	Pid             int    `json:"pid"`
-	Ppid            int    `json:"ppid"`
-	Pgid            int    `json:"pgid"`
-	Name            string `json:"name"`
-	Username        string `json:"username"`
-	State           string `json:"state"`
-	CmdLine         string `json:"cmdline"`
-	Cwd             string `json:"cwd"`
+	Pid             int      `json:"pid"`
+	Ppid            int      `json:"ppid"`
+	Pgid            int      `json:"pgid"`
+	Name            string   `json:"name"`
+	Username        string   `json:"username"`
+	State           string   `json:"state"`
+	Args            []string `json:"args"`
+	CmdLine         string   `json:"cmdline"`
+	Cwd             string   `json:"cwd"`
+	Executable      string   `json:"executable"`
 	Mem             sigar.ProcMem
 	Cpu             sigar.ProcTime
 	SampleTime      time.Time
@@ -46,7 +65,7 @@ type Process struct {
 	cpuTotalPctNorm float64
 }
 
-// Stats stores the stats of preocesses on the host.
+// Stats stores the stats of processes on the host.
 type Stats struct {
 	Procs        []string
 	ProcsMap     ProcsMap
@@ -57,6 +76,8 @@ type Stats struct {
 
 	procRegexps []match.Matcher // List of regular expressions used to whitelist processes.
 	envRegexps  []match.Matcher // List of regular expressions used to whitelist env vars.
+
+	logger *logp.Logger
 }
 
 // Ticks of CPU for a process
@@ -76,20 +97,21 @@ func newProcess(pid int, cmdline string, env common.MapStr) (*Process, error) {
 	}
 
 	exe := sigar.ProcExe{}
-	if err := exe.Get(pid); err != nil && !sigar.IsNotImplemented(err) && !os.IsPermission(err) {
+	if err := exe.Get(pid); err != nil && !sigar.IsNotImplemented(err) && !os.IsPermission(err) && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("error getting process exe for pid=%d: %v", pid, err)
 	}
 
 	proc := Process{
-		Pid:      pid,
-		Ppid:     state.Ppid,
-		Pgid:     state.Pgid,
-		Name:     state.Name,
-		Username: state.Username,
-		State:    getProcState(byte(state.State)),
-		CmdLine:  cmdline,
-		Cwd:      exe.Cwd,
-		Env:      env,
+		Pid:        pid,
+		Ppid:       state.Ppid,
+		Pgid:       state.Pgid,
+		Name:       state.Name,
+		Username:   state.Username,
+		State:      getProcState(byte(state.State)),
+		CmdLine:    cmdline,
+		Cwd:        exe.Cwd,
+		Executable: exe.Name,
+		Env:        env,
 	}
 
 	return &proc, nil
@@ -113,12 +135,16 @@ func (proc *Process) getDetails(envPredicate func(string) bool) error {
 		return fmt.Errorf("error getting process cpu time for pid=%d: %v", proc.Pid, err)
 	}
 
-	if proc.CmdLine == "" {
+	if len(proc.Args) == 0 {
 		args := sigar.ProcArgs{}
 		if err := args.Get(proc.Pid); err != nil && !sigar.IsNotImplemented(err) {
 			return fmt.Errorf("error getting process arguments for pid=%d: %v", proc.Pid, err)
 		}
-		proc.CmdLine = strings.Join(args.List, " ")
+		proc.Args = args.List
+	}
+
+	if proc.CmdLine == "" && len(proc.Args) > 0 {
+		proc.CmdLine = strings.Join(proc.Args, " ")
 	}
 
 	if fd, err := getProcFDUsage(proc.Pid); err != nil {
@@ -193,15 +219,10 @@ func getProcEnv(pid int, out common.MapStr, filter func(v string) bool) error {
 	return nil
 }
 
+// GetProcMemPercentage returns process memory usage as a percent of total memory usage
 func GetProcMemPercentage(proc *Process, totalPhyMem uint64) float64 {
-	// in unit tests, total_phymem is set to a value greater than zero
 	if totalPhyMem == 0 {
-		memStat, err := memory.Get()
-		if err != nil {
-			logp.Warn("Getting memory details: %v", err)
-			return 0
-		}
-		totalPhyMem = memStat.Mem.Total
+		return 0
 	}
 
 	perc := (float64(proc.Mem.Resident) / float64(totalPhyMem))
@@ -209,6 +230,7 @@ func GetProcMemPercentage(proc *Process, totalPhyMem uint64) float64 {
 	return common.Round(perc, 4)
 }
 
+// Pids returns a list of PIDs
 func Pids() ([]int, error) {
 	pids := sigar.ProcList{}
 	err := pids.Get()
@@ -249,6 +271,15 @@ func GetOwnResourceUsageTimeInMillis() (int64, int64, error) {
 }
 
 func (procStats *Stats) getProcessEvent(process *Process) common.MapStr {
+
+	var totalPhyMem uint64
+	baseMem, err := memory.Get()
+	if err != nil {
+		procStats.logger.Warnf("Getting memory details: %v", err)
+	} else {
+		totalPhyMem = baseMem.Mem.Total
+	}
+
 	proc := common.MapStr{
 		"pid":      process.Pid,
 		"ppid":     process.Ppid,
@@ -260,10 +291,14 @@ func (procStats *Stats) getProcessEvent(process *Process) common.MapStr {
 			"size": process.Mem.Size,
 			"rss": common.MapStr{
 				"bytes": process.Mem.Resident,
-				"pct":   GetProcMemPercentage(process, 0 /* read total mem usage */),
+				"pct":   GetProcMemPercentage(process, totalPhyMem),
 			},
 			"share": process.Mem.Share,
 		},
+	}
+
+	if len(process.Args) > 0 {
+		proc["args"] = process.Args
 	}
 
 	if process.CmdLine != "" {
@@ -272,6 +307,10 @@ func (procStats *Stats) getProcessEvent(process *Process) common.MapStr {
 
 	if process.Cwd != "" {
 		proc["cwd"] = process.Cwd
+	}
+
+	if process.Executable != "" {
+		proc["exe"] = process.Executable
 	}
 
 	if len(process.Env) > 0 {
@@ -345,9 +384,10 @@ func (procStats *Stats) matchProcess(name string) bool {
 	return false
 }
 
-// Init initizalizes a Stats instance. It returns erros if the provided process regexes
+// Init initializes a Stats instance. It returns errors if the provided process regexes
 // cannot be compiled.
 func (procStats *Stats) Init() error {
+	procStats.logger = logp.NewLogger("processes")
 	procStats.ProcsMap = make(ProcsMap)
 
 	if len(procStats.Procs) == 0 {
@@ -399,7 +439,7 @@ func (procStats *Stats) Get() ([]common.MapStr, error) {
 	procStats.ProcsMap = newProcs
 
 	processes = procStats.includeTopProcesses(processes)
-	logp.Debug("processes", "Filtered top processes down to %d processes", len(processes))
+	procStats.logger.Debugf("Filtered top processes down to %d processes", len(processes))
 
 	procs := make([]common.MapStr, 0, len(processes))
 	for _, process := range processes {
@@ -440,18 +480,18 @@ func (procStats *Stats) getSingleProcess(pid int, newProcs ProcsMap) *Process {
 
 	process, err := newProcess(pid, cmdline, env)
 	if err != nil {
-		logp.Debug("processes", "Skip process pid=%d: %v", pid, err)
+		procStats.logger.Debugf("Skip process pid=%d: %v", pid, err)
 		return nil
 	}
 
 	if !procStats.matchProcess(process.Name) {
-		logp.Debug("processes", "Process name does not matches the provided regex; pid=%d; name=%s: %v", pid, process.Name, err)
+		procStats.logger.Debugf("Process name does not matches the provided regex; pid=%d; name=%s: %v", pid, process.Name, err)
 		return nil
 	}
 
 	err = process.getDetails(procStats.isWhitelistedEnvVar)
 	if err != nil {
-		logp.Err("Error getting process details. pid=%d: %v", process.Pid, err)
+		procStats.logger.Debugf("Error getting details for process %s with pid=%d: %v", process.Name, process.Pid, err)
 		return nil
 	}
 

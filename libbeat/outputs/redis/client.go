@@ -1,21 +1,40 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package redis
 
 import (
+	"context"
 	"errors"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/garyburd/redigo/redis"
 
-	"github.com/elastic/beats/libbeat/beat"
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/libbeat/outputs"
-	"github.com/elastic/beats/libbeat/outputs/codec"
-	"github.com/elastic/beats/libbeat/outputs/outil"
-	"github.com/elastic/beats/libbeat/outputs/transport"
-	"github.com/elastic/beats/libbeat/publisher"
+	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/common/transport"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/outputs"
+	"github.com/elastic/beats/v7/libbeat/outputs/codec"
+	"github.com/elastic/beats/v7/libbeat/outputs/outil"
+	"github.com/elastic/beats/v7/libbeat/publisher"
 )
 
 var (
@@ -28,6 +47,7 @@ type publishFn func(
 ) ([]publisher.Event, error)
 
 type client struct {
+	log *logp.Logger
 	*transport.Client
 	observer outputs.Observer
 	index    string
@@ -56,11 +76,12 @@ func newClient(
 	index string, codec codec.Codec,
 ) *client {
 	return &client{
+		log:      logp.NewLogger("redis"),
 		Client:   tc,
 		observer: observer,
 		timeout:  timeout,
 		password: pass,
-		index:    index,
+		index:    strings.ToLower(index),
 		db:       db,
 		dataType: dt,
 		key:      key,
@@ -69,7 +90,7 @@ func newClient(
 }
 
 func (c *client) Connect() error {
-	debugf("connect")
+	c.log.Debug("connect")
 	err := c.Client.Connect()
 	if err != nil {
 		return err
@@ -110,11 +131,11 @@ func initRedisConn(c redis.Conn, pwd string, db int) error {
 }
 
 func (c *client) Close() error {
-	debugf("close connection")
+	c.log.Debug("close connection")
 	return c.Client.Close()
 }
 
-func (c *client) Publish(batch publisher.Batch) error {
+func (c *client) Publish(_ context.Context, batch publisher.Batch) error {
 	if c == nil {
 		panic("no client")
 	}
@@ -133,6 +154,10 @@ func (c *client) Publish(batch publisher.Batch) error {
 
 	batch.ACK()
 	return err
+}
+
+func (c *client) String() string {
+	return "redis(" + c.Client.String() + ")"
 }
 
 func (c *client) makePublish(
@@ -202,7 +227,7 @@ func (c *client) publishEventsBulk(conn redis.Conn, command string) publishFn {
 		args := make([]interface{}, 1, len(data)+1)
 		args[0] = dest
 
-		okEvents, args := serializeEvents(args, 1, data, c.index, c.codec)
+		okEvents, args := serializeEvents(c.log, args, 1, data, c.index, c.codec)
 		c.observer.Dropped(len(data) - len(okEvents))
 		if (len(args) - 1) == 0 {
 			return nil, nil
@@ -211,7 +236,7 @@ func (c *client) publishEventsBulk(conn redis.Conn, command string) publishFn {
 		// RPUSH returns total length of list -> fail and retry all on error
 		_, err := conn.Do(command, args...)
 		if err != nil {
-			logp.Err("Failed to %v to redis list with %v", command, err)
+			c.log.Errorf("Failed to %v to redis list with: %+v", command, err)
 			return okEvents, err
 
 		}
@@ -225,7 +250,7 @@ func (c *client) publishEventsPipeline(conn redis.Conn, command string) publishF
 	return func(key outil.Selector, data []publisher.Event) ([]publisher.Event, error) {
 		var okEvents []publisher.Event
 		serialized := make([]interface{}, 0, len(data))
-		okEvents, serialized = serializeEvents(serialized, 0, data, c.index, c.codec)
+		okEvents, serialized = serializeEvents(c.log, serialized, 0, data, c.index, c.codec)
 		c.observer.Dropped(len(data) - len(okEvents))
 		if len(serialized) == 0 {
 			return nil, nil
@@ -236,14 +261,14 @@ func (c *client) publishEventsPipeline(conn redis.Conn, command string) publishF
 		for i, serializedEvent := range serialized {
 			eventKey, err := key.Select(&okEvents[i].Content)
 			if err != nil {
-				logp.Err("Failed to set redis key: %v", err)
+				c.log.Errorf("Failed to set redis key: %+v", err)
 				dropped++
 				continue
 			}
 
 			data = append(data, okEvents[i])
 			if err := conn.Send(command, eventKey, serializedEvent); err != nil {
-				logp.Err("Failed to execute %v: %v", command, err)
+				c.log.Errorf("Failed to execute %v: %+v", command, err)
 				return okEvents, err
 			}
 		}
@@ -259,12 +284,12 @@ func (c *client) publishEventsPipeline(conn redis.Conn, command string) publishF
 			_, err := conn.Receive()
 			if err != nil {
 				if _, ok := err.(redis.Error); ok {
-					logp.Err("Failed to %v event to list with %v",
+					c.log.Errorf("Failed to %v event to list with %+v",
 						command, err)
 					failed = append(failed, data[i])
 					lastErr = err
 				} else {
-					logp.Err("Failed to %v multiple events to list with %v",
+					c.log.Errorf("Failed to %v multiple events to list with %+v",
 						command, err)
 					failed = append(failed, data[i:]...)
 					lastErr = err
@@ -279,6 +304,7 @@ func (c *client) publishEventsPipeline(conn redis.Conn, command string) publishF
 }
 
 func serializeEvents(
+	log *logp.Logger,
 	to []interface{},
 	i int,
 	data []publisher.Event,
@@ -290,7 +316,8 @@ func serializeEvents(
 	for _, d := range data {
 		serializedEvent, err := codec.Encode(index, &d.Content)
 		if err != nil {
-			logp.Err("Encoding event failed with error: %v", err)
+			log.Errorf("Encoding event failed with error: %+v", err)
+			log.Debugf("Failed event: %v", d.Content)
 			goto failLoop
 		}
 
@@ -307,7 +334,8 @@ failLoop:
 	for _, d := range rest {
 		serializedEvent, err := codec.Encode(index, &d.Content)
 		if err != nil {
-			logp.Err("Encoding event failed with error: %v", err)
+			log.Errorf("Encoding event failed with error: %+v", err)
+			log.Debugf("Failed event: %v", d.Content)
 			i++
 			continue
 		}

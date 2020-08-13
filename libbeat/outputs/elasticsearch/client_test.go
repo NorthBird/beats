@@ -1,8 +1,26 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // +build !integration
 
 package elasticsearch
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,66 +29,19 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"github.com/elastic/beats/libbeat/beat"
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/common/fmtstr"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/libbeat/outputs/outest"
-	"github.com/elastic/beats/libbeat/outputs/outil"
-	"github.com/elastic/beats/libbeat/publisher"
+	"github.com/elastic/beats/v7/libbeat/beat"
+	e "github.com/elastic/beats/v7/libbeat/beat/events"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/esleg/eslegclient"
+	"github.com/elastic/beats/v7/libbeat/idxmgmt"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/outputs/outest"
+	"github.com/elastic/beats/v7/libbeat/outputs/outil"
+	"github.com/elastic/beats/v7/libbeat/publisher"
+	"github.com/elastic/beats/v7/libbeat/version"
 )
-
-func readStatusItem(in []byte) (int, string, error) {
-	reader := newJSONReader(in)
-	code, msg, err := itemStatus(reader)
-	return code, string(msg), err
-}
-
-func TestESNoErrorStatus(t *testing.T) {
-	response := []byte(`{"create": {"status": 200}}`)
-	code, msg, err := readStatusItem(response)
-
-	assert.Nil(t, err)
-	assert.Equal(t, 200, code)
-	assert.Equal(t, "", msg)
-}
-
-func TestES1StyleErrorStatus(t *testing.T) {
-	response := []byte(`{"create": {"status": 400, "error": "test error"}}`)
-	code, msg, err := readStatusItem(response)
-
-	assert.Nil(t, err)
-	assert.Equal(t, 400, code)
-	assert.Equal(t, `"test error"`, msg)
-}
-
-func TestES2StyleErrorStatus(t *testing.T) {
-	response := []byte(`{"create": {"status": 400, "error": {"reason": "test_error"}}}`)
-	code, msg, err := readStatusItem(response)
-
-	assert.Nil(t, err)
-	assert.Equal(t, 400, code)
-	assert.Equal(t, `{"reason": "test_error"}`, msg)
-}
-
-func TestES2StyleExtendedErrorStatus(t *testing.T) {
-	response := []byte(`
-    {
-      "create": {
-        "status": 400,
-        "error": {
-          "reason": "test_error",
-          "transient": false,
-          "extra": null
-        }
-      }
-    }`)
-	code, _, err := readStatusItem(response)
-
-	assert.Nil(t, err)
-	assert.Equal(t, 400, code)
-}
 
 func TestCollectPublishFailsNone(t *testing.T) {
 	N := 100
@@ -83,8 +54,7 @@ func TestCollectPublishFailsNone(t *testing.T) {
 		events[i] = publisher.Event{Content: beat.Event{Fields: event}}
 	}
 
-	reader := newJSONReader(response)
-	res, _ := bulkCollectPublishFails(reader, events)
+	res, _ := bulkCollectPublishFails(logp.L(), response, events)
 	assert.Equal(t, 0, len(res))
 }
 
@@ -101,12 +71,12 @@ func TestCollectPublishFailMiddle(t *testing.T) {
 	eventFail := publisher.Event{Content: beat.Event{Fields: common.MapStr{"field": 2}}}
 	events := []publisher.Event{event, eventFail, event}
 
-	reader := newJSONReader(response)
-	res, _ := bulkCollectPublishFails(reader, events)
+	res, stats := bulkCollectPublishFails(logp.L(), response, events)
 	assert.Equal(t, 1, len(res))
 	if len(res) == 1 {
 		assert.Equal(t, eventFail, res[0])
 	}
+	assert.Equal(t, stats, bulkResultStats{acked: 2, fails: 1, tooMany: 1})
 }
 
 func TestCollectPublishFailAll(t *testing.T) {
@@ -121,10 +91,10 @@ func TestCollectPublishFailAll(t *testing.T) {
 	event := publisher.Event{Content: beat.Event{Fields: common.MapStr{"field": 2}}}
 	events := []publisher.Event{event, event, event}
 
-	reader := newJSONReader(response)
-	res, _ := bulkCollectPublishFails(reader, events)
+	res, stats := bulkCollectPublishFails(logp.L(), response, events)
 	assert.Equal(t, 3, len(res))
 	assert.Equal(t, events, res)
+	assert.Equal(t, stats, bulkResultStats{fails: 3, tooMany: 3})
 }
 
 func TestCollectPipelinePublishFail(t *testing.T) {
@@ -162,51 +132,9 @@ func TestCollectPipelinePublishFail(t *testing.T) {
 	event := publisher.Event{Content: beat.Event{Fields: common.MapStr{"field": 2}}}
 	events := []publisher.Event{event}
 
-	reader := newJSONReader(response)
-	res, _ := bulkCollectPublishFails(reader, events)
+	res, _ := bulkCollectPublishFails(logp.L(), response, events)
 	assert.Equal(t, 1, len(res))
 	assert.Equal(t, events, res)
-}
-
-func TestGetIndexStandard(t *testing.T) {
-	ts := time.Now().UTC()
-	extension := fmt.Sprintf("%d.%02d.%02d", ts.Year(), ts.Month(), ts.Day())
-	fields := common.MapStr{"field": 1}
-
-	pattern := "beatname-%{+yyyy.MM.dd}"
-	fmtstr := fmtstr.MustCompileEvent(pattern)
-	indexSel := outil.MakeSelector(outil.FmtSelectorExpr(fmtstr, ""))
-
-	event := &beat.Event{Timestamp: ts, Fields: fields}
-	index, _ := getIndex(event, indexSel)
-	assert.Equal(t, index, "beatname-"+extension)
-}
-
-func TestGetIndexOverwrite(t *testing.T) {
-	time := time.Now().UTC()
-	extension := fmt.Sprintf("%d.%02d.%02d", time.Year(), time.Month(), time.Day())
-
-	fields := common.MapStr{
-		"@timestamp": common.Time(time),
-		"field":      1,
-		"beat": common.MapStr{
-			"name": "testbeat",
-		},
-	}
-
-	pattern := "beatname-%%{+yyyy.MM.dd}"
-	fmtstr := fmtstr.MustCompileEvent(pattern)
-	indexSel := outil.MakeSelector(outil.FmtSelectorExpr(fmtstr, ""))
-
-	event := &beat.Event{
-		Timestamp: time,
-		Meta: map[string]interface{}{
-			"index": "dynamicindex",
-		},
-		Fields: fields}
-	index, _ := getIndex(event, indexSel)
-	expected := "dynamicindex-" + extension
-	assert.Equal(t, expected, index)
 }
 
 func BenchmarkCollectPublishFailsNone(b *testing.B) {
@@ -221,10 +149,8 @@ func BenchmarkCollectPublishFailsNone(b *testing.B) {
 	event := publisher.Event{Content: beat.Event{Fields: common.MapStr{"field": 1}}}
 	events := []publisher.Event{event, event, event}
 
-	reader := newJSONReader(nil)
 	for i := 0; i < b.N; i++ {
-		reader.init(response)
-		res, _ := bulkCollectPublishFails(reader, events)
+		res, _ := bulkCollectPublishFails(logp.L(), response, events)
 		if len(res) != 0 {
 			b.Fail()
 		}
@@ -244,10 +170,8 @@ func BenchmarkCollectPublishFailMiddle(b *testing.B) {
 	eventFail := publisher.Event{Content: beat.Event{Fields: common.MapStr{"field": 2}}}
 	events := []publisher.Event{event, eventFail, event}
 
-	reader := newJSONReader(nil)
 	for i := 0; i < b.N; i++ {
-		reader.init(response)
-		res, _ := bulkCollectPublishFails(reader, events)
+		res, _ := bulkCollectPublishFails(logp.L(), response, events)
 		if len(res) != 1 {
 			b.Fail()
 		}
@@ -266,10 +190,8 @@ func BenchmarkCollectPublishFailAll(b *testing.B) {
 	event := publisher.Event{Content: beat.Event{Fields: common.MapStr{"field": 2}}}
 	events := []publisher.Event{event, event, event}
 
-	reader := newJSONReader(nil)
 	for i := 0; i < b.N; i++ {
-		reader.init(response)
-		res, _ := bulkCollectPublishFails(reader, events)
+		res, _ := bulkCollectPublishFails(logp.L(), response, events)
 		if len(res) != 3 {
 			b.Fail()
 		}
@@ -285,23 +207,33 @@ func TestClientWithHeaders(t *testing.T) {
 		// For incoming requests, the Host header is promoted to the
 		// Request.Host field and removed from the Header map.
 		assert.Equal(t, "myhost.local", r.Host)
-		fmt.Fprintln(w, "Hello, client")
+
+		var response string
+		if r.URL.Path == "/" {
+			response = `{ "version": { "number": "7.6.0" } }`
+		} else {
+			response = `{"items":[{"index":{}},{"index":{}},{"index":{}}]}`
+
+		}
+		fmt.Fprintln(w, response)
 		requestCount++
 	}))
 	defer ts.Close()
 
 	client, err := NewClient(ClientSettings{
-		URL:   ts.URL,
-		Index: outil.MakeSelector(outil.ConstSelectorExpr("test")),
-		Headers: map[string]string{
-			"host":   "myhost.local",
-			"X-Test": "testing value",
+		ConnectionSettings: eslegclient.ConnectionSettings{
+			URL: ts.URL,
+			Headers: map[string]string{
+				"host":   "myhost.local",
+				"X-Test": "testing value",
+			},
 		},
+		Index: outil.MakeSelector(outil.ConstSelectorExpr("test", outil.SelectorLowerCase)),
 	}, nil)
 	assert.NoError(t, err)
 
 	// simple ping
-	client.Ping()
+	client.Connect()
 	assert.Equal(t, 1, requestCount)
 
 	// bulk request
@@ -312,53 +244,166 @@ func TestClientWithHeaders(t *testing.T) {
 	}}
 
 	batch := outest.NewBatch(event, event, event)
-	err = client.Publish(batch)
+	err = client.Publish(context.Background(), batch)
 	assert.NoError(t, err)
 	assert.Equal(t, 2, requestCount)
 }
 
-func TestAddToURL(t *testing.T) {
-	type Test struct {
-		url      string
-		path     string
-		pipeline string
-		params   map[string]string
-		expected string
+func TestBulkEncodeEvents(t *testing.T) {
+	cases := map[string]struct {
+		version string
+		docType string
+		config  common.MapStr
+		events  []common.MapStr
+	}{
+		"6.x": {
+			version: "6.8.0",
+			docType: "doc",
+			config:  common.MapStr{},
+			events:  []common.MapStr{{"message": "test"}},
+		},
+		"latest": {
+			version: version.GetDefaultVersion(),
+			docType: "",
+			config:  common.MapStr{},
+			events:  []common.MapStr{{"message": "test"}},
+		},
 	}
-	tests := []Test{
-		{
-			url:      "localhost:9200",
-			path:     "/path",
-			pipeline: "",
-			params:   make(map[string]string),
-			expected: "localhost:9200/path",
-		},
-		{
-			url:      "localhost:9200/",
-			path:     "/path",
-			pipeline: "",
-			params:   make(map[string]string),
-			expected: "localhost:9200/path",
-		},
-		{
-			url:      "localhost:9200",
-			path:     "/path",
-			pipeline: "pipeline_1",
-			params:   make(map[string]string),
-			expected: "localhost:9200/path?pipeline=pipeline_1",
-		},
-		{
-			url:      "localhost:9200/",
-			path:     "/path",
-			pipeline: "",
-			params: map[string]string{
-				"param": "value",
+
+	for name, test := range cases {
+		test := test
+		t.Run(name, func(t *testing.T) {
+			cfg := common.MustNewConfigFrom(test.config)
+			info := beat.Info{
+				IndexPrefix: "test",
+				Version:     test.version,
+			}
+
+			im, err := idxmgmt.DefaultSupport(nil, info, common.NewConfig())
+			require.NoError(t, err)
+
+			index, pipeline, err := buildSelectors(im, info, cfg)
+			require.NoError(t, err)
+
+			events := make([]publisher.Event, len(test.events))
+			for i, fields := range test.events {
+				events[i] = publisher.Event{
+					Content: beat.Event{
+						Timestamp: time.Now(),
+						Fields:    fields,
+					},
+				}
+			}
+
+			encoded, bulkItems := bulkEncodePublishRequest(logp.L(), *common.MustNewVersion(test.version), index, pipeline, events)
+			assert.Equal(t, len(events), len(encoded), "all events should have been encoded")
+			assert.Equal(t, 2*len(events), len(bulkItems), "incomplete bulk")
+
+			// check meta-data for each event
+			for i := 0; i < len(bulkItems); i += 2 {
+				var meta eslegclient.BulkMeta
+				switch v := bulkItems[i].(type) {
+				case eslegclient.BulkCreateAction:
+					meta = v.Create
+				case eslegclient.BulkIndexAction:
+					meta = v.Index
+				default:
+					panic("unknown type")
+				}
+
+				assert.NotEqual(t, "", meta.Index)
+				assert.Equal(t, test.docType, meta.DocType)
+			}
+
+			// TODO: customer per test case validation
+		})
+	}
+}
+
+func TestBulkEncodeEventsWithOpType(t *testing.T) {
+	cases := []common.MapStr{
+		{"_id": "111", "op_type": e.OpTypeIndex, "message": "test 1", "bulkIndex": 0},
+		{"_id": "112", "message": "test 2", "bulkIndex": 2},
+		{"_id": "", "op_type": e.OpTypeDelete, "message": "test 6", "bulkIndex": -1}, // this won't get encoded due to missing _id
+		{"_id": "", "message": "test 3", "bulkIndex": 4},
+		{"_id": "114", "op_type": e.OpTypeDelete, "message": "test 4", "bulkIndex": 6},
+		{"_id": "115", "op_type": e.OpTypeIndex, "message": "test 5", "bulkIndex": 7},
+	}
+
+	cfg := common.MustNewConfigFrom(common.MapStr{})
+	info := beat.Info{
+		IndexPrefix: "test",
+		Version:     version.GetDefaultVersion(),
+	}
+
+	im, err := idxmgmt.DefaultSupport(nil, info, common.NewConfig())
+	require.NoError(t, err)
+
+	index, pipeline, err := buildSelectors(im, info, cfg)
+	require.NoError(t, err)
+
+	events := make([]publisher.Event, len(cases))
+	for i, fields := range cases {
+		meta := common.MapStr{
+			"_id": fields["_id"],
+		}
+		if opType, exists := fields["op_type"]; exists {
+			meta[e.FieldMetaOpType] = opType
+		}
+
+		events[i] = publisher.Event{
+			Content: beat.Event{
+				Meta: meta,
+				Fields: common.MapStr{
+					"message": fields["message"],
+				},
 			},
-			expected: "localhost:9200/path?param=value",
+		}
+	}
+
+	encoded, bulkItems := bulkEncodePublishRequest(logp.L(), *common.MustNewVersion(version.GetDefaultVersion()), index, pipeline, events)
+	require.Equal(t, len(events)-1, len(encoded), "all events should have been encoded")
+	require.Equal(t, 9, len(bulkItems), "incomplete bulk")
+
+	for i := 0; i < len(cases); i++ {
+		bulkEventIndex, _ := cases[i]["bulkIndex"].(int)
+		if bulkEventIndex == -1 {
+			continue
+		}
+		caseOpType, _ := cases[i]["op_type"]
+		caseMessage, _ := cases[i]["message"].(string)
+		switch bulkItems[bulkEventIndex].(type) {
+		case eslegclient.BulkCreateAction:
+			validOpTypes := []interface{}{e.OpTypeCreate, nil}
+			require.Contains(t, validOpTypes, caseOpType, caseMessage)
+		case eslegclient.BulkIndexAction:
+			require.Equal(t, e.OpTypeIndex, caseOpType, caseMessage)
+		case eslegclient.BulkDeleteAction:
+			require.Equal(t, e.OpTypeDelete, caseOpType, caseMessage)
+		default:
+			require.FailNow(t, "unknown type")
+		}
+	}
+
+}
+
+func TestClientWithAPIKey(t *testing.T) {
+	var headers http.Header
+
+	// Start a mock HTTP server, save request headers
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = r.Header
+	}))
+	defer ts.Close()
+
+	client, err := NewClient(ClientSettings{
+		ConnectionSettings: eslegclient.ConnectionSettings{
+			URL:    ts.URL,
+			APIKey: "hyokHG4BfWk5viKZ172X:o45JUkyuS--yiSAuuxl8Uw",
 		},
-	}
-	for _, test := range tests {
-		url := addToURL(test.url, test.path, test.pipeline, test.params)
-		assert.Equal(t, url, test.expected)
-	}
+	}, nil)
+	assert.NoError(t, err)
+
+	client.Connect()
+	assert.Equal(t, "ApiKey aHlva0hHNEJmV2s1dmlLWjE3Mlg6bzQ1SlVreXVTLS15aVNBdXV4bDhVdw==", headers.Get("Authorization"))
 }

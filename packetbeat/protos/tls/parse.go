@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package tls
 
 import (
@@ -7,13 +24,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
-	"encoding/pem"
 	"fmt"
 	"strings"
 
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/common/streambuf"
-	"github.com/elastic/beats/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/common/streambuf"
+	"github.com/elastic/beats/v7/libbeat/logp"
 )
 
 type direction uint8
@@ -166,7 +182,7 @@ func (header *recordHeader) isValid() bool {
 	return header.version.major == 3 && header.length <= maxTLSRecordLength
 }
 
-func (hello helloMessage) toMap() common.MapStr {
+func (hello *helloMessage) toMap() common.MapStr {
 	m := common.MapStr{
 		"version": fmt.Sprintf("%d.%d", hello.version.major, hello.version.minor),
 	}
@@ -174,20 +190,13 @@ func (hello helloMessage) toMap() common.MapStr {
 		m["session_id"] = hello.sessionID
 	}
 
-	if len(hello.supported.cipherSuites) > 0 || len(hello.supported.compression) > 0 {
-		ciphers := make([]string, len(hello.supported.cipherSuites))
-		for idx, code := range hello.supported.cipherSuites {
-			ciphers[idx] = code.String()
-		}
-		m["supported_ciphers"] = ciphers
-
+	if len(hello.supported.compression) > 0 {
 		comp := make([]string, len(hello.supported.compression))
 		for idx, code := range hello.supported.compression {
 			comp[idx] = code.String()
 		}
 		m["supported_compression_methods"] = comp
 	} else {
-		m["selected_cipher"] = hello.selected.cipherSuite.String()
 		m["selected_compression_method"] = hello.selected.compression.String()
 	}
 
@@ -195,6 +204,14 @@ func (hello helloMessage) toMap() common.MapStr {
 		m["extensions"] = hello.extensions.Parsed
 	}
 	return m
+}
+
+func (hello *helloMessage) supportedCiphers() []string {
+	ciphers := make([]string, len(hello.supported.cipherSuites))
+	for idx, code := range hello.supported.cipherSuites {
+		ciphers[idx] = code.String()
+	}
+	return ciphers
 }
 
 func (parser *parser) parse(buf *streambuf.Buffer) parserResult {
@@ -460,24 +477,22 @@ func parseServerHello(buffer bufferView) *helloMessage {
 	return &result
 }
 
-func parseCertificates(buffer bufferView) []*x509.Certificate {
+func parseCertificates(buffer bufferView) (certs []*x509.Certificate) {
 	var totalLen uint32
 	if !buffer.read24Net(0, &totalLen) || int(totalLen+3) != buffer.length() {
 		return nil
 	}
-
-	var certs []*x509.Certificate
 
 	for pos, limit := 3, int(totalLen)+3; pos+3 <= limit; {
 		var certLen uint32
 		if !buffer.read24Net(pos, &certLen) || pos+3+int(certLen) > limit {
 			return nil
 		}
-		cert := buffer.readBytes(pos+3, int(certLen))
-		if len(cert) != int(certLen) {
+		raw := buffer.readBytes(pos+3, int(certLen))
+		if len(raw) != int(certLen) {
 			return nil
 		}
-		parsed, err := x509.ParseCertificate(cert)
+		parsed, err := x509.ParseCertificate(raw)
 		if err != nil {
 			return nil
 		}
@@ -495,6 +510,31 @@ func (version tlsVersion) String() string {
 		return "SSL 3.0"
 	}
 	return fmt.Sprintf("(raw %d.%d)", version.major, version.minor)
+}
+
+// ProtocolVersion represents a version of the TLS protocol.
+type ProtocolVersion struct {
+	// Protocol in use. One of "tls", "ssl" or "unknown".
+	Protocol string
+	// Version is the protocol version, as in "1.3" for tls or "3.0" for ssl.
+	Version string
+}
+
+// GetProtocolVersion returns the protocol and protocol version number
+// associated to the raw TLS protocol version.
+func (version tlsVersion) GetProtocolVersion() ProtocolVersion {
+	if version.major == 3 {
+		if version.minor == 0 {
+			return ProtocolVersion{Protocol: "ssl", Version: "3.0"}
+		}
+		return ProtocolVersion{Protocol: "tls", Version: fmt.Sprintf("1.%d", version.minor-1)}
+	}
+	return ProtocolVersion{Protocol: "unknown", Version: fmt.Sprintf("%d.%d", version.major, version.minor)}
+}
+
+// IsZero returns if this version is the zero value (unset).
+func (version tlsVersion) IsZero() bool {
+	return version.major == 0 && version.minor == 0
 }
 
 func getKeySize(key interface{}) int {
@@ -526,16 +566,19 @@ func getKeySize(key interface{}) int {
 	return 0
 }
 
-func certToMap(cert *x509.Certificate, includeRaw bool) common.MapStr {
+// certToMap takes an x509 cert and converts it into a map.
+func certToMap(cert *x509.Certificate) common.MapStr {
 	certMap := common.MapStr{
 		"signature_algorithm":  cert.SignatureAlgorithm.String(),
 		"public_key_algorithm": toString(cert.PublicKeyAlgorithm),
-		"version":              cert.Version,
-		"serial_number":        cert.SerialNumber.Text(10),
-		"issuer":               toMap(&cert.Issuer),
-		"subject":              toMap(&cert.Subject),
-		"not_before":           cert.NotBefore,
-		"not_after":            cert.NotAfter,
+		// remove this in 8.x
+		"version":        cert.Version,
+		"serial_number":  cert.SerialNumber.Text(10),
+		"issuer":         toMap(&cert.Issuer),
+		"subject":        toMap(&cert.Subject),
+		"not_before":     cert.NotBefore,
+		"not_after":      cert.NotAfter,
+		"version_number": cert.Version,
 	}
 	if keySize := getKeySize(cert.PublicKey); keySize > 0 {
 		certMap["public_key_size"] = keySize
@@ -547,13 +590,6 @@ func certToMap(cert *x509.Certificate, includeRaw bool) common.MapStr {
 	}
 	if len(san) > 0 {
 		certMap["alternative_names"] = san
-	}
-	if includeRaw {
-		block := pem.Block{
-			Type:  "CERTIFICATE",
-			Bytes: cert.Raw,
-		}
-		certMap["raw"] = string(pem.EncodeToMemory(&block))
 	}
 	return certMap
 }
@@ -568,11 +604,14 @@ func toMap(name *pkix.Name) common.MapStr {
 		{"organization", name.Organization},
 		{"organizational_unit", name.OrganizationalUnit},
 		{"locality", name.Locality},
+		// remove this in 8.x
 		{"province", name.Province},
 		{"postal_code", name.PostalCode},
 		{"serial_number", name.SerialNumber},
 		{"common_name", name.CommonName},
 		{"street_address", name.StreetAddress},
+		{"state_or_province", name.Province},
+		{"distinguished_name", name.String()},
 	}
 	for _, field := range fields {
 		var str string

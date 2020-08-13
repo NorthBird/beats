@@ -1,90 +1,71 @@
 [[configuring-howto-filebeat]]
-= Configuring Filebeat
+= Configure {beatname_uc}
 
 [partintro]
 --
-Before modifying configuration settings, make sure you've completed the
-<<filebeat-configuration,configuration steps>> in the Getting Started.
-This section describes some common use cases for changing configuration options.
+++++
+<titleabbrev>Configure</titleabbrev>
+++++
 
-To configure {beatname_uc}, you edit the configuration file. For rpm and deb,
-you’ll find the configuration file at +/etc/{beatname_lc}/{beatname_lc}.yml+.
-There's also a full example configuration file at
-+/etc/{beatname_lc}/{beatname_lc}.reference.yml+ that shows all non-deprecated
-options. For mac and win, look in the archive that you extracted.
+include::{libbeat-dir}/shared/configuring-intro.asciidoc[]
 
-The {beatname_uc} configuration file uses http://yaml.org/[YAML] for its syntax.
-See the {libbeat}/config-file-format.html[Config File Format] section of the
-_Beats Platform Reference_ for more about the structure of the config file.
-
-The following topics describe how to configure Filebeat:
-
-* <<configuration-filebeat-modules>>
 * <<configuration-filebeat-options>>
-* <<multiline-examples>>
+* <<configuration-{beatname_lc}-modules>>
 * <<configuration-general-options>>
-* <<filebeat-configuration-reloading>>
-* <<configuring-internal-queue>>
-* <<configuring-output>>
-* <<load-balancing>>
-* <<configuration-ssl>>
-* <<filtering-and-enhancing-data>>
-* <<configuring-ingest-node>>
 * <<configuration-path>>
+* <<filebeat-configuration-reloading>>
+* <<configuring-output>>
+* <<configuration-ssl>>
+* <<ilm>>
+* <<configuration-template>>
 * <<setup-kibana-endpoint>>
 * <<configuration-dashboards>>
-* <<configuration-template>>
-* <<configuration-logging>>
-* <<using-environ-vars>>
+* <<filtering-and-enhancing-data>>
 * <<configuration-autodiscover>>
-* <<yaml-tips>>
+* <<configuring-internal-queue>>
+* <<load-balancing>>
+* <<configuration-logging>>
+* <<http-endpoint>>
 * <<regexp-support>>
+* <<configuration-instrumentation>>
 * <<{beatname_lc}-reference-yml>>
 
 --
 
-include::./filebeat-modules-options.asciidoc[]
-
 include::./filebeat-options.asciidoc[]
 
-include::./multiple-prospectors.asciidoc[]
-
-include::./multiline.asciidoc[]
+include::{docdir}/../docs/filebeat-modules-options.asciidoc[]
 
 include::./filebeat-general-options.asciidoc[]
 
+include::{libbeat-dir}/shared-path-config.asciidoc[]
+
 include::./reload-configuration.asciidoc[]
 
-:allplatforms:
-include::../../libbeat/docs/queueconfig.asciidoc[]
+include::{libbeat-dir}/outputconfig.asciidoc[]
 
-include::../../libbeat/docs/outputconfig.asciidoc[]
+include::{libbeat-dir}/shared-ssl-config.asciidoc[]
 
-include::./load-balancing.asciidoc[]
+include::../../libbeat/docs/shared-ilm.asciidoc[]
 
-include::../../libbeat/docs/shared-ssl-config.asciidoc[]
+include::{libbeat-dir}/setup-config.asciidoc[]
 
 include::./filebeat-filtering.asciidoc[]
 
-include::../../libbeat/docs/shared-config-ingest.asciidoc[]
+:autodiscoverJolokia:
+:autodiscoverHints:
+include::{libbeat-dir}/shared-autodiscover.asciidoc[]
 
-include::../../libbeat/docs/shared-path-config.asciidoc[]
+include::{libbeat-dir}/queueconfig.asciidoc[]
 
-include::../../libbeat/docs/shared-kibana-config.asciidoc[]
+include::./load-balancing.asciidoc[]
 
-include::../../libbeat/docs/setup-config.asciidoc[]
+include::{libbeat-dir}/loggingconfig.asciidoc[]
 
-include::../../libbeat/docs/loggingconfig.asciidoc[]
+include::{libbeat-dir}/http-endpoint.asciidoc[]
 
-:standalone:
-include::../../libbeat/docs/shared-env-vars.asciidoc[]
+include::{libbeat-dir}/regexp.asciidoc[]
 
-include::../../libbeat/docs/shared-autodiscover.asciidoc[]
+include::{libbeat-dir}/shared-instrumentation.asciidoc[]
 
-:standalone:
-:allplatforms:
-include::../../libbeat/docs/yaml.asciidoc[]
-
-include::../../libbeat/docs/regexp.asciidoc[]
-
-include::../../libbeat/docs/reference-yml.asciidoc[]
+include::{libbeat-dir}/reference-yml.asciidoc[]

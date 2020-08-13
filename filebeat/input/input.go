@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package input
 
 import (
@@ -5,13 +22,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mitchellh/hashstructure"
-
-	"github.com/elastic/beats/filebeat/channel"
-	"github.com/elastic/beats/filebeat/input/file"
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/logp"
+	"github.com/elastic/beats/v7/filebeat/channel"
+	"github.com/elastic/beats/v7/filebeat/input/file"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/monitoring"
 )
+
+var (
+	inputList = monitoring.NewUniqueList()
+)
+
+func init() {
+	monitoring.NewFunc(monitoring.GetNamespace("state").GetRegistry(), "input", inputList.Report, monitoring.Report)
+}
 
 // Input is the interface common to all input
 type Input interface {
@@ -26,7 +50,6 @@ type Runner struct {
 	input    Input
 	done     chan struct{}
 	wg       *sync.WaitGroup
-	ID       uint64
 	Once     bool
 	beatDone chan struct{}
 }
@@ -34,10 +57,9 @@ type Runner struct {
 // New instantiates a new Runner
 func New(
 	conf *common.Config,
-	outlet channel.Factory,
+	connector channel.Connector,
 	beatDone chan struct{},
 	states []file.State,
-	dynFields *common.MapStrPointer,
 ) (*Runner, error) {
 	input := &Runner{
 		config:   defaultConfig,
@@ -52,13 +74,6 @@ func New(
 		return nil, err
 	}
 
-	var h map[string]interface{}
-	conf.Unpack(&h)
-	input.ID, err = hashstructure.Hash(h, nil)
-	if err != nil {
-		return nil, err
-	}
-
 	var f Factory
 	f, err = GetFactory(input.config.Type)
 	if err != nil {
@@ -66,13 +81,13 @@ func New(
 	}
 
 	context := Context{
-		States:        states,
-		Done:          input.done,
-		BeatDone:      input.beatDone,
-		DynamicFields: dynFields,
+		States:   states,
+		Done:     input.done,
+		BeatDone: input.beatDone,
+		Meta:     nil,
 	}
 	var ipt Input
-	ipt, err = f(conf, outlet, context)
+	ipt, err = f(conf, connector, context)
 	if err != nil {
 		return input, err
 	}
@@ -84,7 +99,6 @@ func New(
 // Start starts the input
 func (p *Runner) Start() {
 	p.wg.Add(1)
-	logp.Info("Starting input of type: %v; ID: %d ", p.config.Type, p.ID)
 
 	onceWg := sync.WaitGroup{}
 	if p.Once {
@@ -93,6 +107,7 @@ func (p *Runner) Start() {
 	}
 
 	onceWg.Add(1)
+	inputList.Add(p.config.Type)
 	// Add waitgroup to make sure input is finished
 	go func() {
 		defer func() {
@@ -132,11 +147,10 @@ func (p *Runner) Stop() {
 	// Stop scanning and wait for completion
 	close(p.done)
 	p.wg.Wait()
+	inputList.Remove(p.config.Type)
 }
 
 func (p *Runner) stop() {
-	logp.Info("Stopping Input: %d", p.ID)
-
 	// In case of once, it will be waited until harvesters close itself
 	if p.Once {
 		p.input.Wait()
@@ -146,5 +160,5 @@ func (p *Runner) stop() {
 }
 
 func (p *Runner) String() string {
-	return fmt.Sprintf("input [type=%s, ID=%d]", p.config.Type, p.ID)
+	return fmt.Sprintf("input [type=%s]", p.config.Type)
 }

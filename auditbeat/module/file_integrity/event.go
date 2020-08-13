@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package file_integrity
 
 import (
@@ -14,15 +31,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/pkg/errors"
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/sha3"
 
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/common/file"
-	"github.com/elastic/beats/metricbeat/mb"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/common/file"
+	"github.com/elastic/beats/v7/metricbeat/mb"
 )
 
 // Source identifies the source of an event (i.e. what triggered it).
@@ -39,7 +58,7 @@ func (s Source) String() string {
 func (s Source) MarshalText() ([]byte, error) { return []byte(s.String()), nil }
 
 const (
-	// SourceScan identifies events triggerd by a file system scan.
+	// SourceScan identifies events triggered by a file system scan.
 	SourceScan Source = iota
 	// SourceFSNotify identifies events triggered by a notification from the
 	// file system.
@@ -196,6 +215,24 @@ func NewEvent(
 	return NewEventFromFileInfo(path, info, err, action, source, maxFileSize, hashTypes)
 }
 
+func isASCIILetter(letter byte) bool {
+	// It appears that Windows only allows ascii characters for drive letters
+	// and that's what go checks for: https://golang.org/src/path/filepath/path_windows.go#L63
+	// **If** Windows/go ever return multibyte utf16 characters we'll need to change
+	// the drive letter mapping logic.
+	return (letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z')
+}
+
+func getDriveLetter(path string) string {
+	volume := filepath.VolumeName(path)
+	if len(volume) == 2 && volume[1] == ':' {
+		if isASCIILetter(volume[0]) {
+			return strings.ToUpper(volume[:1])
+		}
+	}
+	return ""
+}
+
 func buildMetricbeatEvent(e *Event, existedBefore bool) mb.Event {
 	file := common.MapStr{
 		"path": e.Path,
@@ -219,6 +256,12 @@ func buildMetricbeatEvent(e *Event, existedBefore bool) mb.Event {
 		file["ctime"] = info.CTime
 
 		if e.Info.Type == FileType {
+			if extension := filepath.Ext(e.Path); extension != "" {
+				file["extension"] = extension
+			}
+			if mimeType := getMimeType(e.Path); mimeType != "" {
+				file["mime_type"] = mimeType
+			}
 			file["size"] = info.Size
 		}
 
@@ -227,12 +270,15 @@ func buildMetricbeatEvent(e *Event, existedBefore bool) mb.Event {
 		}
 
 		if runtime.GOOS == "windows" {
+			if drive := getDriveLetter(e.Path); drive != "" {
+				file["drive_letter"] = drive
+			}
 			if info.SID != "" {
 				file["uid"] = info.SID
 			}
 		} else {
-			file["uid"] = info.UID
-			file["gid"] = info.GID
+			file["uid"] = strconv.Itoa(int(info.UID))
+			file["gid"] = strconv.Itoa(int(info.GID))
 			file["mode"] = fmt.Sprintf("%#04o", uint32(info.Mode))
 		}
 
@@ -258,12 +304,19 @@ func buildMetricbeatEvent(e *Event, existedBefore bool) mb.Event {
 		for hashType, digest := range e.Hashes {
 			hashes[string(hashType)] = digest
 		}
+		file["hash"] = hashes
+		// Remove this for 8.x
 		out.MetricSetFields.Put("hash", hashes)
 	}
 
+	out.MetricSetFields.Put("event.kind", "event")
+	out.MetricSetFields.Put("event.category", []string{"file"})
 	if e.Action > 0 {
-		actions := e.Action.InOrder(existedBefore, e.Info != nil).StringArray()
-		out.MetricSetFields.Put("event.action", actions)
+		actions := e.Action.InOrder(existedBefore, e.Info != nil)
+		out.MetricSetFields.Put("event.type", actions.ECSTypes())
+		out.MetricSetFields.Put("event.action", actions.StringArray())
+	} else {
+		out.MetricSetFields.Put("event.type", None.ECSTypes())
 	}
 
 	return out
@@ -377,6 +430,8 @@ func hashFile(name string, hashType ...HashType) (map[HashType]Digest, error) {
 			hashes = append(hashes, sha512.New512_224())
 		case SHA512_256:
 			hashes = append(hashes, sha512.New512_256())
+		case XXH64:
+			hashes = append(hashes, xxhash.New())
 		default:
 			return nil, errors.Errorf("unknown hash type '%v'", name)
 		}

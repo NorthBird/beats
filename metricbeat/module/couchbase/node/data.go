@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package node
 
 import (
@@ -5,8 +22,8 @@ import (
 
 	"strconv"
 
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/logp"
 )
 
 type NodeSystemStats struct {
@@ -18,20 +35,20 @@ type NodeSystemStats struct {
 }
 
 type NodeInterestingStats struct {
-	CmdGet                   int64 `json:"cmd_get"`
-	CouchDocsActualDiskSize  int64 `json:"couch_docs_actual_disk_size"`
-	CouchDocsDataSize        int64 `json:"couch_docs_data_size"`
-	CouchSpatialDataSize     int64 `json:"couch_spatial_data_size"`
-	CouchSpatialDiskSize     int64 `json:"couch_spatial_disk_size"`
-	CouchViewsActualDiskSize int64 `json:"couch_views_actual_disk_size"`
-	CouchViewsDataSize       int64 `json:"couch_views_data_size"`
-	CurrItems                int64 `json:"curr_items"`
-	CurrItemsTot             int64 `json:"curr_items_tot"`
-	EpBgFetched              int64 `json:"ep_bg_fetched"`
-	GetHits                  int64 `json:"get_hits"`
-	MemUsed                  int64 `json:"mem_used"`
-	Ops                      int64 `json:"ops"`
-	VbReplicaCurrItems       int64 `json:"vb_replica_curr_items"`
+	CmdGet                   float64 `json:"cmd_get"`
+	CouchDocsActualDiskSize  int64   `json:"couch_docs_actual_disk_size"`
+	CouchDocsDataSize        int64   `json:"couch_docs_data_size"`
+	CouchSpatialDataSize     int64   `json:"couch_spatial_data_size"`
+	CouchSpatialDiskSize     int64   `json:"couch_spatial_disk_size"`
+	CouchViewsActualDiskSize int64   `json:"couch_views_actual_disk_size"`
+	CouchViewsDataSize       int64   `json:"couch_views_data_size"`
+	CurrItems                int64   `json:"curr_items"`
+	CurrItemsTot             int64   `json:"curr_items_tot"`
+	EpBgFetched              int64   `json:"ep_bg_fetched"`
+	GetHits                  int64   `json:"get_hits"`
+	MemUsed                  int64   `json:"mem_used"`
+	Ops                      int64   `json:"ops"`
+	VbReplicaCurrItems       int64   `json:"vb_replica_curr_items"`
 }
 
 type Node struct {
@@ -60,7 +77,7 @@ func eventsMapping(content []byte) []common.MapStr {
 	var d Data
 	err := json.Unmarshal(content, &d)
 	if err != nil {
-		logp.Err("Error: ", err)
+		logp.Err("Error: %+v", err)
 	}
 
 	events := []common.MapStr{}

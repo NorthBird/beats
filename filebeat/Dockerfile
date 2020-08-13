@@ -1,16 +1,17 @@
-FROM golang:1.9.2
-MAINTAINER Nicolas Ruflin <ruflin@elastic.co>
+FROM golang:1.14.7
 
-RUN set -x && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-         netcat python-pip virtualenv && \
-    apt-get clean
+RUN \
+    apt-get update \
+      && apt-get install -y --no-install-recommends \
+         libsystemd-dev \
+         netcat \
+         rsync \
+         python3 \
+         python3-pip \
+         python3-venv \
+         libpcap-dev \
+      && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade setuptools
-
-# Setup work environment
-ENV FILEBEAT_PATH /go/src/github.com/elastic/beats/filebeat
-
-RUN mkdir -p $FILEBEAT_PATH/build/coverage
-WORKDIR $FILEBEAT_PATH
+RUN pip3 install --upgrade pip==20.1.1
+RUN pip3 install --upgrade setuptools==47.3.2
+RUN pip3 install --upgrade docker-compose==1.23.2

@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // +build !integration
 
 package udp
@@ -7,14 +24,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/packetbeat/protos"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/packetbeat/protos"
 
 	// import plugins for testing
-	_ "github.com/elastic/beats/packetbeat/protos/http"
-	_ "github.com/elastic/beats/packetbeat/protos/mysql"
-	_ "github.com/elastic/beats/packetbeat/protos/redis"
+	_ "github.com/elastic/beats/v7/packetbeat/protos/http"
+	_ "github.com/elastic/beats/v7/packetbeat/protos/mysql"
+	_ "github.com/elastic/beats/v7/packetbeat/protos/redis"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -152,7 +169,7 @@ func Test_buildPortsMap(t *testing.T) {
 
 	for _, test := range configTests {
 		output, err := buildPortsMap(test.Input)
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		assert.Equal(t, test.Output, output)
 	}
 }
@@ -181,12 +198,12 @@ func Test_buildPortsMap_portOverlapError(t *testing.T) {
 
 	for _, test := range tests {
 		_, err := buildPortsMap(test.Input)
-		assert.NotNil(t, err)
+		assert.Error(t, err)
 		assert.Contains(t, err.Error(), test.Err)
 	}
 }
 
-// Verify that decideProtocol returns the protocol assocated with the
+// Verify that decideProtocol returns the protocol associated with the
 // packet's source port.
 func Test_decideProtocol_bySrcPort(t *testing.T) {
 	test := testSetup(t)
@@ -196,7 +213,7 @@ func Test_decideProtocol_bySrcPort(t *testing.T) {
 	assert.Equal(t, PROTO, test.udp.decideProtocol(&tuple))
 }
 
-// Verify that decideProtocol returns the protocol assocated with the
+// Verify that decideProtocol returns the protocol associated with the
 // packet's destination port.
 func Test_decideProtocol_byDstPort(t *testing.T) {
 	test := testSetup(t)

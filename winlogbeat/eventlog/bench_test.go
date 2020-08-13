@@ -1,123 +1,172 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // +build windows
 
 package eventlog
 
 import (
+	"bytes"
 	"flag"
+	"fmt"
 	"math/rand"
-	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
-	"time"
 
-	elog "github.com/andrewkroh/sys/windows/svc/eventlog"
-	"github.com/dustin/go-humanize"
+	"golang.org/x/sys/windows/svc/eventlog"
+
+	"github.com/elastic/beats/v7/libbeat/common"
 )
 
-// Benchmark tests with customized output. (`go test -v -benchtime 10s -benchtest .`)
+const gigabyte = 1 << 30
 
 var (
-	benchTest    = flag.Bool("benchtest", false, "Run benchmarks for the eventlog package")
-	injectAmount = flag.Int("inject", 50000, "Number of events to inject before running benchmarks")
+	benchTest    = flag.Bool("benchtest", false, "Run benchmarks for the eventlog package.")
+	injectAmount = flag.Int("inject", 1E6, "Number of events to inject before running benchmarks.")
 )
 
-// TestBenchmarkBatchReadSize tests the performance of different
-// batch_read_size values.
-func TestBenchmarkBatchReadSize(t *testing.T) {
+// TestBenchmarkRead benchmarks each event log reader implementation with
+// different batch sizes.
+//
+// Recommended usage:
+//   go test -run TestBenchmarkRead -benchmem -benchtime 10s -benchtest -v .
+func TestBenchmarkRead(t *testing.T) {
 	if !*benchTest {
 		t.Skip("-benchtest not enabled")
 	}
 
-	log, err := initLog(providerName, sourceName, eventCreateMsgFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		err := uninstallLog(providerName, sourceName, log)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}()
+	writer, teardown := createLog(t)
+	defer teardown()
 
-	// Increase the log size so that it can hold these large events.
-	output, err := exec.Command("wevtutil.exe", "sl", "/ms:1073741824", providerName).CombinedOutput()
-	if err != nil {
-		t.Fatal(err, string(output))
-	}
+	setLogSize(t, providerName, gigabyte)
 
 	// Publish test messages:
 	for i := 0; i < *injectAmount; i++ {
-		err = log.Report(elog.Info, uint32(rng.Int63()%1000), []string{strconv.Itoa(i) + " " + randString(256)})
-		if err != nil {
-			t.Fatal("ReportEvent error", err)
-		}
-	}
-
-	benchTest := func(batchSize int) {
-		var err error
-		result := testing.Benchmark(func(b *testing.B) {
-			eventlog, tearDown := setupWinEventLog(t, 0, map[string]interface{}{
-				"name":            providerName,
-				"batch_read_size": batchSize,
-			})
-			defer tearDown()
-			b.ResetTimer()
-
-			// Each iteration reads one batch.
-			for i := 0; i < b.N; i++ {
-				_, err = eventlog.Read()
-				if err != nil {
-					return
-				}
-			}
-		})
-
+		err := writer.Report(eventlog.Info, uint32(rand.Int63()%1000), []string{strconv.Itoa(i) + " " + randomSentence(256)})
 		if err != nil {
 			t.Fatal(err)
-			return
 		}
-
-		t.Logf("batch_size=%v, total_events=%v, batch_time=%v, events_per_sec=%v, bytes_alloced_per_event=%v, total_allocs=%v",
-			batchSize,
-			result.N*batchSize,
-			time.Duration(result.NsPerOp()),
-			float64(batchSize)/time.Duration(result.NsPerOp()).Seconds(),
-			humanize.Bytes(result.MemBytes/(uint64(result.N)*uint64(batchSize))),
-			result.MemAllocs)
 	}
 
-	benchTest(10)
-	benchTest(100)
-	benchTest(500)
-	benchTest(1000)
+	for _, api := range []string{winEventLogAPIName, winEventLogExpAPIName} {
+		t.Run("api="+api, func(t *testing.T) {
+			for _, batchSize := range []int{10, 100, 500, 1000} {
+				t.Run(fmt.Sprintf("batch_size=%d", batchSize), func(t *testing.T) {
+					result := testing.Benchmark(benchmarkEventLog(api, batchSize))
+					outputBenchmarkResults(t, result)
+				})
+			}
+		})
+	}
+
+	t.Run("api="+eventLoggingAPIName, func(t *testing.T) {
+		result := testing.Benchmark(benchmarkEventLog(eventLoggingAPIName, -1))
+		outputBenchmarkResults(t, result)
+	})
 }
 
-// Utility Functions
-
-var rng = rand.NewSource(time.Now().UnixNano())
-
-const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-const (
-	letterIdxBits = 6                    // 6 bits to represent a letter index
-	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
-	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
-)
-
-// https://stackoverflow.com/questions/22892120/how-to-generate-a-random-string-of-a-fixed-length-in-golang
-func randString(n int) string {
-	b := make([]byte, n)
-	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
-	for i, cache, remain := n-1, rng.Int63(), letterIdxMax; i >= 0; {
-		if remain == 0 {
-			cache, remain = rng.Int63(), letterIdxMax
+func benchmarkEventLog(api string, batchSize int) func(b *testing.B) {
+	return func(b *testing.B) {
+		conf := common.MapStr{
+			"name": providerName,
 		}
-		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
-			b[i] = letterBytes[idx]
-			i--
+		if strings.HasPrefix(api, "wineventlog") {
+			conf.Put("batch_read_size", batchSize)
+			conf.Put("no_more_events", "stop")
 		}
-		cache >>= letterIdxBits
-		remain--
+
+		log := openLog(b, api, nil, conf)
+		defer log.Close()
+
+		events := 0
+		b.ResetTimer()
+
+		// Each iteration reads one batch.
+		for i := 0; i < b.N; i++ {
+			records, err := log.Read()
+			if err != nil {
+				b.Fatal(err)
+				return
+			}
+			events += len(records)
+		}
+
+		b.StopTimer()
+
+		b.ReportMetric(float64(events), "events")
+		b.ReportMetric(float64(batchSize), "batch_size")
+	}
+}
+
+func outputBenchmarkResults(t testing.TB, result testing.BenchmarkResult) {
+	totalBatches := result.N
+	totalEvents := int(result.Extra["events"])
+	totalBytes := result.MemBytes
+	totalAllocs := result.MemAllocs
+
+	eventsPerSec := float64(totalEvents) / result.T.Seconds()
+	bytesPerEvent := float64(totalBytes) / float64(totalEvents)
+	bytesPerBatch := float64(totalBytes) / float64(totalBatches)
+	allocsPerEvent := float64(totalAllocs) / float64(totalEvents)
+	allocsPerBatch := float64(totalAllocs) / float64(totalBatches)
+
+	t.Logf("%.2f events/sec\t %d B/event\t %d B/batch\t %d allocs/event\t %d allocs/batch",
+		eventsPerSec, int(bytesPerEvent), int(bytesPerBatch), int(allocsPerEvent), int(allocsPerBatch))
+}
+
+var randomWords = []string{
+	"recover",
+	"article",
+	"highway",
+	"bargain",
+	"trolley",
+	"college",
+	"attract",
+	"wriggle",
+	"feather",
+	"neutral",
+	"percent",
+	"quality",
+	"manager",
+	"hunting",
+	"arrange",
+}
+
+func randomSentence(n uint) string {
+	buf := bytes.NewBuffer(make([]byte, n))
+	buf.Reset()
+
+	for {
+		idx := rand.Uint32() % uint32(len(randomWords))
+		word := randomWords[idx]
+
+		if buf.Len()+len(word) <= buf.Cap() {
+			buf.WriteString(randomWords[idx])
+		} else {
+			break
+		}
+
+		if buf.Len()+1 <= buf.Cap() {
+			buf.WriteByte(' ')
+		} else {
+			break
+		}
 	}
 
-	return string(b)
+	return buf.String()
 }

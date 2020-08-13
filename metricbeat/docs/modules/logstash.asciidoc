@@ -1,14 +1,24 @@
 ////
-This file is generated! See scripts/docs_collector.py
+This file is generated! See scripts/mage/docs_collector.go
 ////
 
 [[metricbeat-module-logstash]]
 == Logstash module
 
-experimental[]
+The `logstash` module collects metrics about {ls}.
 
-This is the Logstash module.
+[float]
+=== Compatibility
 
+The `logstash` module works with {ls} 7.3.0 and later.
+
+[float]
+=== Usage for Stack Monitoring
+
+The `logstash` module can be used to collect metrics shown in our {stack} {monitor-features}
+UI in {kib}. To enable this usage, set `xpack.enabled: true` and remove any `metricsets`
+from the module's configuration. Alternatively, run `metricbeat modules disable logstash` and
+`metricbeat modules enable logstash-xpack`.
 
 
 [float]
@@ -22,13 +32,13 @@ in <<configuration-metricbeat>>. Here is an example configuration:
 metricbeat.modules:
 - module: logstash
   metricsets: ["node", "node_stats"]
-  enabled: false
+  enabled: true
   period: 10s
-  hosts: ["localhost"]
-
+  hosts: ["localhost:9600"]
 ----
 
-This module supports TLS connection when using `ssl` config field, as described in <<configuration-ssl>>.
+This module supports TLS connections when using `ssl` config field, as described in <<configuration-ssl>>.
+It also supports the options described in <<module-http-config-options>>.
 
 [float]
 === Metricsets

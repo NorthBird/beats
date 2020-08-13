@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 """
 This script generates and output a documentation from a list of Makefile files
@@ -7,7 +7,6 @@ Example usage:
 
    python generate_makefile_doc.py Makefile1 Makefile2 ...
 """
-
 import argparse
 import re
 
@@ -31,7 +30,7 @@ regexp_target_doc = re.compile(
     r'^((?P<name>(-|_|\w)+)|(\${(?P<varname>(-|_|\w)+)}))\s*:.*\#\#+\s*@(?P<category>(\w+))\s+(?P<doc>(.*))')
 
 
-# Parse a Makefile variable assignement:
+# Parse a Makefile variable assignment:
 #
 # Example 1:
 # BEAT_LICENSE?=ASL 2.0 ## @packaging Software license of the application
@@ -54,7 +53,7 @@ regexp_var_help = re.compile(
 # Parse a Makefile line according to the given regexp
 # - insert the dict { name, default, is_variable, category, doc} to the categories dictionary
 # - insert the category to the categories_set
-# - return a pair [name, value] if the line is a Makefile variable assignement
+# - return a pair [name, value] if the line is a Makefile variable assignment
 def parse_line(line, regexp, categories, categories_set):
     matches = regexp.match(line)
     variable = None

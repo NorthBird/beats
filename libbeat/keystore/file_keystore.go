@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package keystore
 
 import (
@@ -17,8 +34,8 @@ import (
 
 	"golang.org/x/crypto/pbkdf2"
 
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/common/file"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/common/file"
 )
 
 const (
@@ -33,6 +50,12 @@ const (
 
 // Version of the keystore format, will be added at the beginning of the file.
 var version = []byte("v1")
+
+// Packager defines a keystore that we can read the raw bytes and be packaged in an artifact.
+type Packager interface {
+	Package() ([]byte, error)
+	ConfiguredPath() string
+}
 
 // FileKeystore Allows to store key / secrets pair securely into an encrypted local file.
 type FileKeystore struct {
@@ -49,9 +72,30 @@ type serializableSecureString struct {
 	Value []byte `json:"value"`
 }
 
+// Factory Create the right keystore with the configured options.
+func Factory(cfg *common.Config, defaultPath string) (Keystore, error) {
+	config := defaultConfig
+
+	if cfg == nil {
+		cfg = common.NewConfig()
+	}
+	err := cfg.Unpack(&config)
+
+	if err != nil {
+		return nil, fmt.Errorf("could not read keystore configuration, err: %v", err)
+	}
+
+	if config.Path == "" {
+		config.Path = defaultPath
+	}
+
+	keystore, err := NewFileKeystore(config.Path)
+	return keystore, err
+}
+
 // NewFileKeystore returns an new File based keystore or an error, currently users cannot set their
 // own password on the keystore, the default password will be an empty string. When the keystore
-// is initialied the secrets are automatically loaded into memory.
+// is initialized the secrets are automatically loaded into memory.
 func NewFileKeystore(keystoreFile string) (Keystore, error) {
 	return NewFileKeystoreWithPassword(keystoreFile, NewSecureString([]byte("")))
 }
@@ -168,7 +212,7 @@ func (k *FileKeystore) IsPersisted() bool {
 	return true
 }
 
-// doSave lock/unlocking of the ressource need to be done by the caller.
+// doSave lock/unlocking of the resource need to be done by the caller.
 func (k *FileKeystore) doSave(override bool) error {
 	if k.dirty == false {
 		return nil
@@ -217,41 +261,53 @@ func (k *FileKeystore) doSave(override bool) error {
 	return nil
 }
 
-func (k *FileKeystore) load() error {
-	k.Lock()
-	defer k.Unlock()
-
+func (k *FileKeystore) loadRaw() ([]byte, error) {
 	f, err := os.OpenFile(k.Path, os.O_RDONLY, filePermission)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	defer f.Close()
 
 	if common.IsStrictPerms() {
 		if err := k.checkPermissions(k.Path); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	raw, err := ioutil.ReadAll(f)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	v := raw[0:len(version)]
 	if !bytes.Equal(v, version) {
-		return fmt.Errorf("keystore format doesn't match expected version: '%s' got '%s'", version, v)
+		return nil, fmt.Errorf("keystore format doesn't match expected version: '%s' got '%s'", version, v)
 	}
 
-	base64Content := raw[len(version):]
-	if len(base64Content) == 0 {
-		return fmt.Errorf("corrupt or empty keystore")
+	if len(raw) <= len(version) {
+		return nil, fmt.Errorf("corrupt or empty keystore")
 	}
 
-	base64Decoder := base64.NewDecoder(base64.StdEncoding, bytes.NewReader(base64Content))
+	return raw, nil
+}
+
+func (k *FileKeystore) load() error {
+	k.Lock()
+	defer k.Unlock()
+
+	raw, err := k.loadRaw()
+	if err != nil {
+		return err
+	}
+
+	if len(raw) == 0 {
+		return nil
+	}
+
+	base64Decoder := base64.NewDecoder(base64.StdEncoding, bytes.NewReader(raw[len(version):]))
 	plaintext, err := k.decrypt(base64Decoder)
 	if err != nil {
 		return fmt.Errorf("could not decrypt the keystore: %v", err)
@@ -360,7 +416,7 @@ func (k *FileKeystore) checkPermissions(f string) error {
 	perm := info.Mode().Perm()
 
 	if fileUID != 0 && euid != fileUID {
-		return fmt.Errorf(`config file ("%v") must be owned by the beat user `+
+		return fmt.Errorf(`config file ("%v") must be owned by the user identifier `+
 			`(uid=%v) or root`, f, euid)
 	}
 
@@ -377,6 +433,18 @@ func (k *FileKeystore) checkPermissions(f string) error {
 	}
 
 	return nil
+}
+
+// Package returns the bytes of the encrypted keystore.
+func (k *FileKeystore) Package() ([]byte, error) {
+	k.Lock()
+	defer k.Unlock()
+	return k.loadRaw()
+}
+
+// ConfiguredPath returns the path to the keystore.
+func (k *FileKeystore) ConfiguredPath() string {
+	return k.Path
 }
 
 func (k *FileKeystore) hashPassword(password, salt []byte) []byte {

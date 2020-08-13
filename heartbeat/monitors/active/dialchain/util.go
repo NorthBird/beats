@@ -1,32 +1,40 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package dialchain
 
 import (
 	"net"
 	"time"
 
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/outputs/transport"
+	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/common/transport"
 )
 
 type timer struct {
 	s, e time.Time
 }
 
-// IDLayer creates an empty placeholder layer.
-func IDLayer() Layer {
-	return _idLayer
-}
-
-var _idLayer = Layer(func(event common.MapStr, next transport.Dialer) (transport.Dialer, error) {
-	return next, nil
-})
-
 // ConstAddrLayer introduces a network layer always passing a constant address
 // to the underlying layer.
 func ConstAddrLayer(address string) Layer {
 	build := constAddr(address)
 
-	return func(event common.MapStr, next transport.Dialer) (transport.Dialer, error) {
+	return func(event *beat.Event, next transport.Dialer) (transport.Dialer, error) {
 		return build(next), nil
 	}
 }
@@ -91,7 +99,7 @@ func constAddr(addr string) func(transport.Dialer) transport.Dialer {
 }
 
 func withNetDialer(layer NetDialer, fn func(transport.Dialer) transport.Dialer) NetDialer {
-	return func(event common.MapStr) (transport.Dialer, error) {
+	return func(event *beat.Event) (transport.Dialer, error) {
 		origDialer, err := layer.build(event)
 		if err != nil {
 			return nil, err
@@ -101,7 +109,7 @@ func withNetDialer(layer NetDialer, fn func(transport.Dialer) transport.Dialer) 
 }
 
 func withLayerDialer(layer Layer, fn func(transport.Dialer) transport.Dialer) Layer {
-	return func(event common.MapStr, next transport.Dialer) (transport.Dialer, error) {
+	return func(event *beat.Event, next transport.Dialer) (transport.Dialer, error) {
 		origDialer, err := layer.build(event, next)
 		if err != nil {
 			return nil, err

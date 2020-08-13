@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package beater
 
 import (
@@ -9,25 +26,25 @@ import (
 
 	"github.com/tsg/gopacket/layers"
 
-	"github.com/elastic/beats/libbeat/beat"
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/libbeat/processors"
-	"github.com/elastic/beats/libbeat/service"
+	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/processors"
+	"github.com/elastic/beats/v7/libbeat/service"
 
-	"github.com/elastic/beats/packetbeat/config"
-	"github.com/elastic/beats/packetbeat/decoder"
-	"github.com/elastic/beats/packetbeat/flows"
-	"github.com/elastic/beats/packetbeat/procs"
-	"github.com/elastic/beats/packetbeat/protos"
-	"github.com/elastic/beats/packetbeat/protos/icmp"
-	"github.com/elastic/beats/packetbeat/protos/tcp"
-	"github.com/elastic/beats/packetbeat/protos/udp"
-	"github.com/elastic/beats/packetbeat/publish"
-	"github.com/elastic/beats/packetbeat/sniffer"
+	"github.com/elastic/beats/v7/packetbeat/config"
+	"github.com/elastic/beats/v7/packetbeat/decoder"
+	"github.com/elastic/beats/v7/packetbeat/flows"
+	"github.com/elastic/beats/v7/packetbeat/procs"
+	"github.com/elastic/beats/v7/packetbeat/protos"
+	"github.com/elastic/beats/v7/packetbeat/protos/icmp"
+	"github.com/elastic/beats/v7/packetbeat/protos/tcp"
+	"github.com/elastic/beats/v7/packetbeat/protos/udp"
+	"github.com/elastic/beats/v7/packetbeat/publish"
+	"github.com/elastic/beats/v7/packetbeat/sniffer"
 
 	// Add packetbeat default processors
-	_ "github.com/elastic/beats/packetbeat/processor/add_kubernetes_metadata"
+	_ "github.com/elastic/beats/v7/packetbeat/processor/add_kubernetes_metadata"
 )
 
 // Beater object. Contains all objects needed to run the beat
@@ -92,11 +109,17 @@ func New(b *beat.Beat, rawConfig *common.Config) (beat.Beater, error) {
 
 // init packetbeat components
 func (pb *packetbeat) init(b *beat.Beat) error {
+	var err error
 	cfg := &pb.config
-	err := procs.ProcWatcher.Init(cfg.Procs)
-	if err != nil {
-		logp.Critical(err.Error())
-		return err
+	// Enable the process watcher only if capturing live traffic
+	if cfg.Interfaces.File == "" {
+		err = procs.ProcWatcher.Init(cfg.Procs)
+		if err != nil {
+			logp.Critical(err.Error())
+			return err
+		}
+	} else {
+		logp.Info("Process watcher disabled when file input is used")
 	}
 
 	pb.pipeline = b.Publisher
@@ -155,8 +178,11 @@ func (pb *packetbeat) setupFlows() error {
 	}
 
 	client, err := pb.pipeline.ConnectWith(beat.ClientConfig{
-		EventMetadata: config.Flows.EventMetadata,
-		Processor:     processors,
+		Processing: beat.ProcessingConfig{
+			EventMetadata: config.Flows.EventMetadata,
+			Processor:     processors,
+			KeepNull:      config.Flows.KeepNull,
+		},
 	})
 	if err != nil {
 		return err
@@ -282,7 +308,7 @@ func (pb *packetbeat) icmpConfig() (*common.Config, error) {
 		}
 
 		if icmp != nil {
-			return nil, errors.New("More then one icmp confgigurations found")
+			return nil, errors.New("More then one icmp configurations found")
 		}
 
 		icmp = cfg

@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 // +build !integration
 // +build darwin freebsd linux windows
 
@@ -12,7 +29,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/elastic/beats/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/common"
 	"github.com/elastic/gosigar"
 )
 
@@ -20,7 +37,7 @@ func TestPids(t *testing.T) {
 	pids, err := Pids()
 
 	assert.NotNil(t, pids)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	// Assuming at least 2 processes are running
 	assert.True(t, (len(pids) > 1))
@@ -64,6 +81,13 @@ func TestGetProcess(t *testing.T) {
 	case "linux":
 		assert.True(t, (len(process.Cwd) > 0))
 	}
+}
+
+// See https://github.com/elastic/beats/issues/6620
+func TestGetSelfPid(t *testing.T) {
+	pid, err := GetSelfPid()
+	assert.NoError(t, err)
+	assert.Equal(t, os.Getpid(), pid)
 }
 
 func TestProcState(t *testing.T) {

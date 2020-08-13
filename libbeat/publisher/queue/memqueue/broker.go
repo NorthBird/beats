@@ -1,22 +1,38 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package memqueue
 
 import (
 	"sync"
 	"time"
 
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/publisher/queue"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/feature"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/publisher/queue"
 )
 
-type Broker struct {
+type broker struct {
 	done chan struct{}
 
 	logger logger
 
 	bufSize int
-	// buf         brokerBuffer
-	// minEvents   int
-	// idleTimeout time.Duration
 
 	// api channels
 	events    chan pushRequest
@@ -27,7 +43,7 @@ type Broker struct {
 	acks          chan int
 	scheduledACKs chan chanList
 
-	eventer queue.Eventer
+	ackListener queue.ACKListener
 
 	// wait group for worker shutdown
 	wg          sync.WaitGroup
@@ -35,7 +51,7 @@ type Broker struct {
 }
 
 type Settings struct {
-	Eventer        queue.Eventer
+	ACKListener    queue.ACKListener
 	Events         int
 	FlushMinEvents int
 	FlushTimeout   time.Duration
@@ -56,30 +72,43 @@ type chanList struct {
 }
 
 func init() {
-	queue.RegisterType("mem", create)
+	queue.RegisterQueueType(
+		"mem",
+		create,
+		feature.MakeDetails(
+			"Memory queue",
+			"Buffer events in memory before sending to the output.",
+			feature.Stable))
 }
 
-func create(eventer queue.Eventer, cfg *common.Config) (queue.Queue, error) {
+func create(
+	ackListener queue.ACKListener, logger *logp.Logger, cfg *common.Config,
+) (queue.Queue, error) {
 	config := defaultConfig
 	if err := cfg.Unpack(&config); err != nil {
 		return nil, err
 	}
 
-	return NewBroker(Settings{
-		Eventer:        eventer,
+	if logger == nil {
+		logger = logp.L()
+	}
+
+	return NewQueue(logger, Settings{
+		ACKListener:    ackListener,
 		Events:         config.Events,
 		FlushMinEvents: config.FlushMinEvents,
 		FlushTimeout:   config.FlushTimeout,
 	}), nil
 }
 
-// NewBroker creates a new broker based in-memory queue holding up to sz number of events.
+// NewQueue creates a new broker based in-memory queue holding up to sz number of events.
 // If waitOnClose is set to true, the broker will block on Close, until all internal
 // workers handling incoming messages and ACKs have been shut down.
-func NewBroker(
+func NewQueue(
+	logger logger,
 	settings Settings,
-) *Broker {
-	// define internal channel size for procuder/client requests
+) queue.Queue {
+	// define internal channel size for producer/client requests
 	// to the broker
 	chanSize := 20
 
@@ -100,8 +129,11 @@ func NewBroker(
 		minEvents = sz
 	}
 
-	logger := defaultLogger
-	b := &Broker{
+	if logger == nil {
+		logger = logp.NewLogger("memqueue")
+	}
+
+	b := &broker{
 		done:   make(chan struct{}),
 		logger: logger,
 
@@ -116,7 +148,7 @@ func NewBroker(
 
 		waitOnClose: settings.WaitOnClose,
 
-		eventer: settings.Eventer,
+		ackListener: settings.ACKListener,
 	}
 
 	var eventLoop interface {
@@ -146,7 +178,7 @@ func NewBroker(
 	return b
 }
 
-func (b *Broker) Close() error {
+func (b *broker) Close() error {
 	close(b.done)
 	if b.waitOnClose {
 		b.wg.Wait()
@@ -154,17 +186,17 @@ func (b *Broker) Close() error {
 	return nil
 }
 
-func (b *Broker) BufferConfig() queue.BufferConfig {
+func (b *broker) BufferConfig() queue.BufferConfig {
 	return queue.BufferConfig{
-		Events: b.bufSize,
+		MaxEvents: b.bufSize,
 	}
 }
 
-func (b *Broker) Producer(cfg queue.ProducerConfig) queue.Producer {
+func (b *broker) Producer(cfg queue.ProducerConfig) queue.Producer {
 	return newProducer(b, cfg.ACK, cfg.OnDrop, cfg.DropOnCancel)
 }
 
-func (b *Broker) Consumer() queue.Consumer {
+func (b *broker) Consumer() queue.Consumer {
 	return newConsumer(b)
 }
 

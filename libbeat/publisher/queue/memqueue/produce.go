@@ -1,28 +1,43 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package memqueue
 
 import (
-	"github.com/elastic/beats/libbeat/beat"
-	"github.com/elastic/beats/libbeat/common/atomic"
-	"github.com/elastic/beats/libbeat/publisher"
-	"github.com/elastic/beats/libbeat/publisher/queue"
+	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/publisher"
+	"github.com/elastic/beats/v7/libbeat/publisher/queue"
 )
 
-type forgetfullProducer struct {
-	broker    *Broker
+type forgetfulProducer struct {
+	broker    *broker
 	openState openState
 }
 
 type ackProducer struct {
-	broker    *Broker
-	cancel    bool
-	seq       uint32
-	state     produceState
-	openState openState
+	broker       *broker
+	dropOnCancel bool
+	seq          uint32
+	state        produceState
+	openState    openState
 }
 
 type openState struct {
 	log    logger
-	isOpen atomic.Bool
 	done   chan struct{}
 	events chan pushRequest
 }
@@ -36,36 +51,35 @@ type produceState struct {
 
 type ackHandler func(count int)
 
-func newProducer(b *Broker, cb ackHandler, dropCB func(beat.Event), dropOnCancel bool) queue.Producer {
+func newProducer(b *broker, cb ackHandler, dropCB func(beat.Event), dropOnCancel bool) queue.Producer {
 	openState := openState{
 		log:    b.logger,
-		isOpen: atomic.MakeBool(true),
 		done:   make(chan struct{}),
 		events: b.events,
 	}
 
 	if cb != nil {
-		p := &ackProducer{broker: b, seq: 1, cancel: dropOnCancel, openState: openState}
+		p := &ackProducer{broker: b, seq: 1, dropOnCancel: dropOnCancel, openState: openState}
 		p.state.cb = cb
 		p.state.dropCB = dropCB
 		return p
 	}
-	return &forgetfullProducer{broker: b, openState: openState}
+	return &forgetfulProducer{broker: b, openState: openState}
 }
 
-func (p *forgetfullProducer) Publish(event publisher.Event) bool {
+func (p *forgetfulProducer) Publish(event publisher.Event) bool {
 	return p.openState.publish(p.makeRequest(event))
 }
 
-func (p *forgetfullProducer) TryPublish(event publisher.Event) bool {
+func (p *forgetfulProducer) TryPublish(event publisher.Event) bool {
 	return p.openState.tryPublish(p.makeRequest(event))
 }
 
-func (p *forgetfullProducer) makeRequest(event publisher.Event) pushRequest {
+func (p *forgetfulProducer) makeRequest(event publisher.Event) pushRequest {
 	return pushRequest{event: event}
 }
 
-func (p *forgetfullProducer) Cancel() int {
+func (p *forgetfulProducer) Cancel() int {
 	p.openState.Close()
 	return 0
 }
@@ -97,7 +111,7 @@ func (p *ackProducer) makeRequest(event publisher.Event) pushRequest {
 func (p *ackProducer) Cancel() int {
 	p.openState.Close()
 
-	if p.cancel {
+	if p.dropOnCancel {
 		ch := make(chan producerCancelResponse)
 		p.broker.pubCancel <- producerCancelRequest{
 			state: &p.state,
@@ -112,7 +126,6 @@ func (p *ackProducer) Cancel() int {
 }
 
 func (st *openState) Close() {
-	st.isOpen.Store(false)
 	close(st.done)
 }
 

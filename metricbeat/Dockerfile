@@ -1,19 +1,28 @@
-FROM golang:1.9.2
-MAINTAINER Nicolas Ruflin <ruflin@elastic.co>
+FROM golang:1.14.7
 
-RUN set -x && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-         netcat python-pip virtualenv && \
-    apt-get clean
+RUN \
+    apt update \
+      && apt install -qq -y --no-install-recommends \
+         netcat \
+         python3 \
+         python3-pip \
+         python3-venv \
+         libaio-dev \
+         unzip \
+      && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade setuptools
+RUN pip3 install --upgrade pip==20.1.1
+RUN pip3 install --upgrade setuptools==47.3.2
+RUN pip3 install --upgrade docker-compose==1.23.2
 
-# Setup work environment
-ENV METRICBEAT_PATH /go/src/github.com/elastic/beats/metricbeat
+# Oracle instant client
+RUN cd /usr/lib \
+  && curl -sLo instantclient-basic-linux.zip https://download.oracle.com/otn_software/linux/instantclient/19600/instantclient-basic-linux.x64-19.6.0.0.0dbru.zip \
+  && unzip instantclient-basic-linux.zip \
+  && rm instantclient-basic-linux.zip
+ENV LD_LIBRARY_PATH=/usr/lib/instantclient_19_6
 
-RUN mkdir -p $METRICBEAT_PATH/build/coverage
-WORKDIR $METRICBEAT_PATH
+ENV PATH=/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/oracle/12.2/client64/bin
 
-# Add healthcheck for docker/healthcheck metricset to check during testing
+# Add healthcheck for the docker/healthcheck metricset to check during testing.
 HEALTHCHECK CMD exit 0

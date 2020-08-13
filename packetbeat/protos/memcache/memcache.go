@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package memcache
 
 // Memcache plugin initialization, message/transaction types and transaction initialization/publishing.
@@ -5,15 +22,16 @@ package memcache
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"time"
 
-	"github.com/elastic/beats/libbeat/beat"
-	"github.com/elastic/beats/libbeat/common"
-	"github.com/elastic/beats/libbeat/logp"
-	"github.com/elastic/beats/libbeat/monitoring"
+	"github.com/elastic/beats/v7/libbeat/beat"
+	"github.com/elastic/beats/v7/libbeat/common"
+	"github.com/elastic/beats/v7/libbeat/logp"
+	"github.com/elastic/beats/v7/libbeat/monitoring"
 
-	"github.com/elastic/beats/packetbeat/protos"
-	"github.com/elastic/beats/packetbeat/protos/applayer"
+	"github.com/elastic/beats/v7/packetbeat/protos"
+	"github.com/elastic/beats/v7/packetbeat/protos/applayer"
 )
 
 // memcache types
@@ -155,7 +173,7 @@ func (mc *memcache) setFromConfig(config *memcacheConfig) error {
 		mc.config.maxBytesPerValue = config.MaxBytesPerValue
 	}
 
-	mc.config.parseUnkown = config.ParseUnknown
+	mc.config.parseUnknown = config.ParseUnknown
 
 	mc.udpConfig.transTimeout = config.UDPTransactionTimeout
 	mc.tcpConfig.tcpTransTimeout = config.TransactionTimeout
@@ -334,18 +352,17 @@ func newTransaction(requ, resp *message) *transaction {
 		t.Init(requ)
 		t.BytesOut = requ.Size
 		t.BytesIn = resp.Size
-		t.ResponseTime = int32(resp.Ts.Sub(requ.Ts).Nanoseconds() / 1e6) // [ms]
+		t.EndTime = resp.Ts
 		t.Notes = append(t.Notes, requ.Notes...)
 		t.Notes = append(t.Notes, resp.Notes...)
 	case requ != nil && resp == nil:
 		t.Init(requ)
 		t.BytesOut = requ.Size
-		t.ResponseTime = -1
 		t.Notes = append(t.Notes, requ.Notes...)
 	case requ == nil && resp != nil:
 		t.Init(resp)
 		t.BytesIn = resp.Size
-		t.ResponseTime = -1
+		t.EndTime = resp.Ts
 		t.Notes = append(t.Notes, resp.Notes...)
 	}
 
@@ -372,12 +389,18 @@ func (t *transaction) Event(event *beat.Event) error {
 	mc := common.MapStr{}
 	event.Fields["memcache"] = mc
 
+	msg := t.request
+	if msg == nil {
+		msg = t.response
+	}
+
 	if t.request != nil {
 		_, err := t.request.SubEvent("request", mc)
 		if err != nil {
 			logp.Warn("error filling transaction request: %v", err)
 			return err
 		}
+		event.Fields["event.action"] = "memcache." + strings.ToLower(t.request.command.typ.String())
 	}
 	if t.response != nil {
 		_, err := t.response.SubEvent("response", mc)
@@ -385,12 +408,12 @@ func (t *transaction) Event(event *beat.Event) error {
 			logp.Warn("error filling transaction response: %v", err)
 			return err
 		}
+		normalized := normalizeEventOutcome(memcacheStatusCode(t.response.status).String())
+		if normalized != "" {
+			event.Fields["event.outcome"] = normalized
+		}
 	}
 
-	msg := t.request
-	if msg == nil {
-		msg = t.response
-	}
 	if msg == nil {
 		mc["protocol_type"] = "unknown"
 	} else {
@@ -402,6 +425,19 @@ func (t *transaction) Event(event *beat.Event) error {
 	}
 
 	return nil
+}
+
+func normalizeEventOutcome(outcome string) string {
+	switch outcome {
+	case "Fail":
+		return "failure"
+	case "UNKNOWN":
+		return "unknown"
+	case "Success":
+		return "success"
+	default:
+		return ""
+	}
 }
 
 func computeTransactionStatus(requ, resp *message) string {
